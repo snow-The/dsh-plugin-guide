@@ -2,15 +2,17 @@
  * dsh-plugin-guide — DSH plugin authoring guide & conformance scanner.
  *
  * Tools:
- *   guide_scan  — scan a plugin directory against the official boot-loader
- *                 conformance rules (dsh.bundle declaration, patch array,
- *                 insert id/name, files allowlist, entry exports).
+ *   guide_scan  — scan a plugin directory OR a dsh profile directory. Plugin
+ *                 mode checks boot-loader conformance (dsh.bundle declaration,
+ *                 patch array, insert id/name, files allowlist, entry exports);
+ *                 profile mode checks bundles/dependencies consistency (a
+ *                 plugin in dependencies but not in bundles is never mounted).
  *   guide_learn — look up official DSH capability usage: ctx.* services,
  *                 official bundle layers, schedule / agent patterns.
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { formatReport, scanPlugin } from './scan.ts';
+import { formatReport, scan } from './scan.ts';
 import { learnTopic } from './guide.ts';
 
 export const name = 'dsh-plugin-guide';
@@ -21,11 +23,11 @@ export function apply(ctx: any): void {
   ctx.tools.register(defineTool({
     name: 'guide_scan',
     description:
-      'Scan a DSH plugin directory for boot-loader conformance: dsh.bundle declaration, cordis.patch.yml as a top-level YAML array with insert id+name rows, files allowlist, main/types and entry exports. Returns a per-rule pass/fail report. Run this before publishing any plugin.',
+      'Scan a DSH plugin directory (boot-loader conformance: dsh.bundle declaration, cordis.patch.yml as a top-level YAML array with insert id+name rows, files allowlist, main/types and entry exports) OR a dsh profile directory (bundles/dependencies consistency — a plugin declared in dependencies but missing from dsh.profile.bundles is never mounted by the boot loader). Auto-detects the mode. Returns a per-rule pass/fail report. Run this before publishing any plugin or deploying a profile.',
     parameters: {
       dir: {
         type: 'string',
-        description: 'Absolute path to the plugin package directory (containing package.json).',
+        description: 'Absolute path to the plugin package directory or the dsh profile directory (containing package.json).',
         required: true,
       },
     },
@@ -34,7 +36,7 @@ export function apply(ctx: any): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      return formatReport(scanPlugin(args.dir));
+      return formatReport(scan(args.dir));
     },
   }));
 

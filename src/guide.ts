@@ -139,7 +139,11 @@ export const TOPICS: Topic[] = [
       '  4. files 白名单应含 dist + patch 文件(避免 publish 垃圾)',
       '  5. main/types 指向真实文件,入口导出 name + apply',
       '',
-      '快速自查:guide_scan <你的插件目录>',
+      'profile 一致性(bundles ↔ dependencies):',
+      '  6. bundles 里的包必须在 dependencies 声明(宿主提供的 @deepseek-ai/dsh-base、@deepseek-ai/dsh-web-app 除外),否则新机器 pnpm install 后 boot 无法解析',
+      '  7. dependencies 里声明了 dsh.bundle 的插件必须在 bundles 里,否则装上了也永远不会被挂载("installed but never loaded" 陷阱)',
+      '',
+      '快速自查:guide_scan <插件目录或 profile 目录>(自动识别模式)',
     ].join('\n'),
   },
   {

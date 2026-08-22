@@ -164,3 +164,99 @@ test('guide_learn falls back to the topic menu for unknown queries', async () =>
   const out = await registered.find((d) => d.name === 'guide_learn').execute({ topic: 'zzz-nonsense' });
   assert.match(out, /可用主题/);
 });
+
+// ---- profile mode ----------------------------------------------------------
+
+const PLUGIN_IN_NM = (name) => JSON.stringify({
+  name,
+  version: '0.1.0',
+  main: './dist/index.js',
+  files: ['dist'],
+  dsh: { bundle: { patch: './cordis.patch.yml' } },
+}, null, 2);
+
+function makeProfileManifest({ deps = {}, bundles = [] }) {
+  return JSON.stringify({
+    name: 'dsh-profile-test',
+    private: true,
+    dependencies: deps,
+    dsh: { profile: { bundles } },
+  }, null, 2);
+}
+
+test('guide_scan profile mode passes a consistent profile (bundles ↔ dependencies)', async () => {
+  const dir = await makeFixture({
+    'package.json': makeProfileManifest({
+      deps: { '@snow-the/dsh-busyloop': '^0.1.4', '@snow-the/dsh-gitkit': '^0.1.0' },
+      bundles: ['@snow-the/dsh-busyloop', '@snow-the/dsh-gitkit'],
+    }),
+    'node_modules/@snow-the/dsh-busyloop/package.json': PLUGIN_IN_NM('@snow-the/dsh-busyloop'),
+    'node_modules/@snow-the/dsh-gitkit/package.json': PLUGIN_IN_NM('@snow-the/dsh-gitkit'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: PASS/);
+    assert.match(out, /profile\.depsInBundles.*all 2 installed plugin/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('guide_scan profile mode catches the busyloop trap: plugin in deps but not in bundles', async () => {
+  const dir = await makeFixture({
+    'package.json': makeProfileManifest({
+      deps: { '@snow-the/dsh-busyloop': '^0.1.4' },
+      bundles: [],
+    }),
+    'node_modules/@snow-the/dsh-busyloop/package.json': PLUGIN_IN_NM('@snow-the/dsh-busyloop'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /installed but NOT in dsh\.profile\.bundles/);
+    assert.match(out, /dsh-busyloop/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('guide_scan profile mode flags a bundle missing from dependencies (unresolvable on fresh install)', async () => {
+  const dir = await makeFixture({
+    'package.json': makeProfileManifest({
+      deps: {},
+      bundles: ['@snow-the/dsh-ghost'],
+    }),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /bundles not declared in dependencies/);
+    assert.match(out, /dsh-ghost/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('guide_scan profile mode exempts host-provided official layers (dsh-base / dsh-web-app)', async () => {
+  const dir = await makeFixture({
+    'package.json': makeProfileManifest({
+      deps: { '@snow-the/dsh-gitkit': '^0.1.0' },
+      bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@snow-the/dsh-gitkit'],
+    }),
+    'node_modules/@snow-the/dsh-gitkit/package.json': PLUGIN_IN_NM('@snow-the/dsh-gitkit'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: PASS/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

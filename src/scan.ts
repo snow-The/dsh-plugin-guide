@@ -14,11 +14,30 @@
  *   7. `main` / `types` must resolve to existing files.
  *   8. The bundled entry module should export `name` and `apply` (static probe
  *      of the built dist text when present).
+ *
+ * Profile mode (scanProfile, auto-selected when the target is a dsh profile —
+ * its package.json declares `dsh.profile.bundles`):
+ *
+ *   9.  Every entry in `dsh.profile.bundles` must also be declared in
+ *       `dependencies` (except the host-provided official layers) — otherwise a
+ *       fresh `pnpm install` cannot resolve the bundle and boot fails.
+ *   10. Every dependency that is itself a dsh plugin (its installed package.json
+ *       declares `dsh.bundle`) must appear in `dsh.profile.bundles` — otherwise
+ *       the boot loader never mounts it ("installed but never loaded", the
+ *       classic deps-only trap).
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+
+/**
+ * Official layers provided by the dsh host (global CLI), not by the profile's
+ * own node_modules — matches @deepseek-ai/dsh-app-boot DEFAULT_PROFILE_BUNDLES
+ * plus the web-app layer. A profile may list them in bundles without declaring
+ * them in dependencies.
+ */
+export const HOST_PROVIDED_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'];
 
 export interface CheckResult {
   rule: string;
@@ -188,6 +207,114 @@ export function scanPlugin(dir: string): ScanReport {
   }
 
   return finish(dir, packageName, checks);
+}
+
+/**
+ * Scan a dsh profile directory (package.json declares `dsh.profile.bundles`).
+ * Catches the "installed but never loaded" trap (a plugin in dependencies but
+ * not in bundles) and its mirror (a bundle that is not declared in
+ * dependencies, so a fresh install cannot resolve it).
+ */
+export function scanProfile(dir: string): ScanReport {
+  const checks: CheckResult[] = [];
+  const manifestPath = join(dir, 'package.json');
+  let manifest: Record<string, unknown> | null = null;
+  let packageName: string | null = null;
+
+  // ---- manifest + profile shape ------------------------------------------
+  if (!existsSync(manifestPath)) {
+    checks.push({ rule: 'profile.manifest', ok: false, detail: 'package.json missing' });
+    return finish(dir, packageName, checks);
+  }
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    packageName = typeof manifest.name === 'string' ? manifest.name : null;
+  } catch (e) {
+    checks.push({ rule: 'profile.manifest', ok: false, detail: `invalid JSON: ${String(e)}` });
+    return finish(dir, packageName, checks);
+  }
+  const profile = manifest.dsh as Record<string, unknown> | undefined;
+  const bundlesRaw = profile?.profile as Record<string, unknown> | undefined;
+  const bundles = Array.isArray(bundlesRaw?.bundles) ? (bundlesRaw.bundles as unknown[]).filter((b): b is string => typeof b === 'string') : null;
+  if (!bundles) {
+    checks.push({ rule: 'profile.manifest', ok: false, detail: 'not a dsh profile: "dsh": { "profile": { "bundles": [...] } } missing' });
+    return finish(dir, packageName, checks);
+  }
+  checks.push({ rule: 'profile.manifest', ok: true, detail: `profile manifest with ${bundles.length} bundle(s)` });
+
+  // ---- 9. every bundle is declared in dependencies ------------------------
+  const deps = (manifest.dependencies ?? {}) as Record<string, unknown>;
+  const depNames = new Set(Object.keys(deps));
+  const missingDeps = bundles.filter((b) => !depNames.has(b) && !HOST_PROVIDED_BUNDLES.includes(b));
+  if (missingDeps.length > 0) {
+    checks.push({
+      rule: 'profile.bundleInDeps',
+      ok: false,
+      detail: `bundles not declared in dependencies (fresh pnpm install cannot resolve them): ${missingDeps.join(', ')} — add to dependencies (host-provided ${HOST_PROVIDED_BUNDLES.join(', ')} exempt)`,
+    });
+  } else {
+    checks.push({
+      rule: 'profile.bundleInDeps',
+      ok: true,
+      detail: `every bundle is declared in dependencies (${HOST_PROVIDED_BUNDLES.length} host-provided layers exempt)`,
+    });
+  }
+
+  // ---- 10. installed plugin deps are in bundles ---------------------------
+  const nmDir = join(dir, 'node_modules');
+  if (!existsSync(nmDir)) {
+    checks.push({ rule: 'profile.depsInBundles', ok: true, detail: 'node_modules not installed — plugin-dependency check skipped (run pnpm install first)' });
+  } else {
+    const orphanPlugins: string[] = [];
+    let inspected = 0;
+    for (const name of Object.keys(deps)) {
+      const pkgPath = join(nmDir, name, 'package.json');
+      if (!existsSync(pkgPath)) continue; // git/scoped deps resolved elsewhere
+      let pkg: Record<string, unknown>;
+      try {
+        pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const isPlugin = Boolean((pkg.dsh as Record<string, unknown> | undefined)?.bundle);
+      if (!isPlugin) continue; // plain library, not a bundle plugin
+      inspected += 1;
+      if (!bundles.includes(name)) orphanPlugins.push(name);
+    }
+    if (orphanPlugins.length > 0) {
+      checks.push({
+        rule: 'profile.depsInBundles',
+        ok: false,
+        detail: `plugin(s) installed but NOT in dsh.profile.bundles — boot never mounts them: ${orphanPlugins.join(', ')}`,
+      });
+    } else {
+      checks.push({
+        rule: 'profile.depsInBundles',
+        ok: true,
+        detail: `all ${inspected} installed plugin dep(s) appear in bundles`,
+      });
+    }
+  }
+
+  return finish(dir, packageName, checks);
+}
+
+/**
+ * Auto-dispatch: plugin directory → scanPlugin, dsh profile directory →
+ * scanProfile (detected by the `dsh.profile.bundles` shape).
+ */
+export function scan(dir: string): ScanReport {
+  const manifestPath = join(dir, 'package.json');
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+      const profileShape = (manifest.dsh as Record<string, unknown> | undefined)?.profile as Record<string, unknown> | undefined;
+      if (profileShape?.bundles) return scanProfile(dir);
+    } catch {
+      // fall through to scanPlugin which reports the JSON error
+    }
+  }
+  return scanPlugin(dir);
 }
 
 function finish(dir: string, packageName: string | null, checks: CheckResult[]): ScanReport {
