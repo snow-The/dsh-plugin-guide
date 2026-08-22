@@ -1,0 +1,5 @@
+# dsh-plugin-guide — DSH plugin authoring guide & conformance scanner
+# 工具:guide_scan(合规扫描)/ guide_learn(官方能力导航)
+- insert:
+    - id: dsh-plugin-guide
+      name: '@snow-the/dsh-plugin-guide'
