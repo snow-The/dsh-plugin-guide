@@ -225,13 +225,23 @@ export function scanPlugin(dir: string): ScanReport {
   if (main && existsSync(resolve(dir, main))) {
     try {
       const text = readFileSync(resolve(dir, main), 'utf8');
-      const usedServices = [...new Set(
-        [...text.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
-      )];
-      const injectMatch = text.match(/export\s+const\s+inject\s*=\s*\[([^\]]*)\]/);
-      const injected = injectMatch
-        ? [...injectMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1])
+      // Declaration and export must be statement-anchored (^ or newline) so the
+      // rule's own help text ("add: export const inject = [...]") never matches.
+      // esbuild bundles hoist the declaration to `var inject = [...]` and collect
+      // exports at the tail (`export { ..., inject, ... }`) — both forms covered.
+      const injectDecl = text.match(/(?:^|\n)\s*(?:export\s+const|const|var|let)\s+inject\s*=\s*\[([^\]]*)\]/);
+      const injectExported = /(?:^|\n)\s*export\s+const\s+inject\b/.test(text)
+        || /(?:^|\n)\s*export\s*\{[^}]*\binject\b/.test(text);
+      const injected = injectDecl && injectExported
+        ? [...injectDecl[1].matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1])
         : [];
+      // Strip string literals before counting ctx.<service> reads, so doc text
+      // inside descriptions (guide_learn lists "ctx.tools" etc.) is not treated
+      // as code access.
+      const codeOnly = text.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '');
+      const usedServices = [...new Set(
+        [...codeOnly.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+      )];
       const missing = usedServices.filter((s) => HOST_REGISTERED_SERVICES.includes(s) && !injected.includes(s));
       if (missing.length > 0) {
         checks.push({
