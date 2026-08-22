@@ -12,6 +12,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { bootCheck } from './boot.ts';
 import { formatReport, scan } from './scan.ts';
 import { learnTopic } from './guide.ts';
 
@@ -37,6 +38,21 @@ export function apply(ctx: any): void {
     },
     async execute(args) {
       return formatReport(scan(args.dir));
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'guide_boot',
+    description:
+      'One-shot DSH boot verification: starts a throwaway `dsh web --port <random cold port> --no-open` instance on this host, waits ~20s, then reports PASS only if the process stays alive AND stderr stays empty (plus port-listening probe). Catches plugin-tree boot crashes (bad tool registration, missing entry, import errors) that would otherwise only surface when the main instance restarts. Temporarily moves the task-board single-instance lock aside and restores it. No arguments.',
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute() {
+      const r = await bootCheck();
+      return [r.ok ? 'PASS' : 'FAIL', r.summary, '', r.detail].join('\n');
     },
   }));
 

@@ -54,7 +54,7 @@ test('apply registers guide_scan and guide_learn', () => {
   const { ctx, registered } = makeCtx();
   apply(ctx);
   const names = registered.map((d) => d.name);
-  assert.deepEqual(names.sort(), ['guide_learn', 'guide_scan']);
+  assert.deepEqual(names.sort(), ['guide_boot', 'guide_learn', 'guide_scan']);
 });
 
 test('guide_scan passes a fully compliant plugin', async () => {
