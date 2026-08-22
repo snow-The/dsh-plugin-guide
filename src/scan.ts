@@ -14,6 +14,12 @@
  *   7. `main` / `types` must resolve to existing files.
  *   8. The bundled entry module should export `name` and `apply` (static probe
  *      of the built dist text when present).
+ *   9. Every `ctx.<service>` read of a host-registered service must be declared
+ *      in `export const inject` (cordis proxy throws "cannot get property X
+ *      without inject" at apply time; optional chaining does not help).
+ *      Currently enforced for 'tools' — the service every dsh host registers
+ *      and the one we crashed on. Optional host capabilities (ctx.http) read
+ *      as undefined and are ignored to avoid false positives.
  *
  * Profile mode (scanProfile, auto-selected when the target is a dsh profile —
  * its package.json declares `dsh.profile.bundles`):
@@ -203,6 +209,41 @@ export function scanPlugin(dir: string): ScanReport {
       }
     } catch {
       checks.push({ rule: 'entry.exports', ok: true, detail: 'could not probe entry text (binary?)' });
+    }
+  }
+
+  // ---- 9. ctx service access requires inject (cordis crash lesson) --------
+  // cordis wraps ctx in a Service proxy: READING a registered-but-not-injected
+  // service property (e.g. ctx.tools) THROWS "cannot get property X without
+  // inject" at apply time — optional chaining (ctx.tools?.register) does NOT
+  // help because the proxy get trap throws. Boot then fails hard. Services the
+  // host does NOT register (ctx.http in the dsh host) read as undefined and do
+  // not throw. We therefore only enforce services every dsh host registers —
+  // currently 'tools' (the one we crashed on) — so optional host capabilities
+  // never produce false positives.
+  const HOST_REGISTERED_SERVICES = ['tools'];
+  if (main && existsSync(resolve(dir, main))) {
+    try {
+      const text = readFileSync(resolve(dir, main), 'utf8');
+      const usedServices = [...new Set(
+        [...text.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+      )];
+      const injectMatch = text.match(/export\s+const\s+inject\s*=\s*\[([^\]]*)\]/);
+      const injected = injectMatch
+        ? [...injectMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1])
+        : [];
+      const missing = usedServices.filter((s) => HOST_REGISTERED_SERVICES.includes(s) && !injected.includes(s));
+      if (missing.length > 0) {
+        checks.push({
+          rule: 'entry.inject',
+          ok: false,
+          detail: `apply reads ctx.${missing.join(', ctx.')} but "export const inject" does not declare ${missing.join(', ')} — cordis proxy THROWS at boot (optional chaining does not help); add: export const inject = [${[...new Set([...injected, ...missing])].map((s) => `'${s}'`).join(', ')}]`,
+        });
+      } else {
+        checks.push({ rule: 'entry.inject', ok: true, detail: 'ctx.<service> reads are declared in inject (or the service is optional on the host)' });
+      }
+    } catch {
+      checks.push({ rule: 'entry.inject', ok: true, detail: 'could not probe entry text (binary?)' });
     }
   }
 

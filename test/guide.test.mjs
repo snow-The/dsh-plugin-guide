@@ -134,6 +134,48 @@ test('guide_scan handles a missing directory gracefully', async () => {
   assert.match(out, /package.json missing/);
 });
 
+test('guide_scan fails ctx.tools access without inject (the exact busyloop 0.1.5 crash)', async () => {
+  const dir = await makeFixture({
+    'package.json': GOOD_MANIFEST,
+    'cordis.patch.yml': GOOD_PATCH,
+    'dist/index.js': `export const name = 'bad-inject';
+export function apply(ctx) { ctx.tools.register({ name: 'x' }); }
+`,
+    'dist/index.d.ts': '',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /entry\.inject/);
+    assert.match(out, /does not declare tools/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('guide_scan ignores optional host services (ctx.http) — no false positive', async () => {
+  const dir = await makeFixture({
+    'package.json': GOOD_MANIFEST,
+    'cordis.patch.yml': GOOD_PATCH,
+    'dist/index.js': `export const name = 'http-ok';
+export const inject = ['tools'];
+export function apply(ctx) { ctx.tools.register({ name: 'x' }); ctx.http?.mount('/x', () => {}); }
+`,
+    'dist/index.d.ts': '',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: PASS/);
+    assert.doesNotMatch(out, /entry\.inject.*FAIL/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('guide_learn returns the overview topic', async () => {
   const { ctx, registered } = makeCtx();
   apply(ctx);
