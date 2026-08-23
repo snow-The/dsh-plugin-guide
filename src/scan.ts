@@ -162,6 +162,26 @@ export function scanPlugin(dir: string): ScanReport {
     }
   }
 
+  // ---- 5b. client.js __ModuleLoader__.load id must equal package name ----
+  // client-modules throws "loaded without registering <package name>" when the
+  // id mismatches — the HARNESS plugin-tree failure we hit on dsh-notemap.
+  if (packageName) {
+    const clientPath = join(dir, 'client.js');
+    if (existsSync(clientPath)) {
+      const clientText = readFileSync(clientPath, 'utf8');
+      const loadId = /__ModuleLoader__\.load\(\s*\{\s*id:\s*['"]([^'"]+)['"]/.exec(clientText);
+      if (!loadId) {
+        checks.push({ rule: 'client.loaderId', ok: false, detail: `client.js must call __ModuleLoader__.load({ id: '<package name>', ... }) — client-modules throws otherwise` });
+      } else if (loadId[1] !== packageName) {
+        checks.push({ rule: 'client.loaderId', ok: false, detail: `client.js registers id "${loadId[1]}" but package name is ${packageName} — loader fails with "loaded without registering ${packageName}"` });
+      } else {
+        checks.push({ rule: 'client.loaderId', ok: true, detail: `client.js registers __ModuleLoader__.load id = ${packageName}` });
+      }
+    } else {
+      checks.push({ rule: 'client.loaderId', ok: true, detail: 'no client.js — client-modules not used' });
+    }
+  }
+
   // ---- 6. files allowlist ships dist + patch ------------------------------
   const files = manifest.files;
   if (!Array.isArray(files)) {
