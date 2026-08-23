@@ -44,14 +44,27 @@ export function apply(ctx: any): void {
   ctx.tools.register(defineTool({
     name: 'guide_boot',
     description:
-      'One-shot DSH boot verification: starts a throwaway `dsh web --port <random cold port> --no-open` instance on this host, waits ~20s, then reports PASS only if the process stays alive AND stderr stays empty (plus port-listening probe). Catches plugin-tree boot crashes (bad tool registration, missing entry, import errors) that would otherwise only surface when the main instance restarts. Temporarily moves the task-board single-instance lock aside and restores it. No arguments.',
-    parameters: {},
+      'One-shot DSH boot verification: starts a throwaway `dsh web --port <random cold port> --no-open` instance on this host, waits ~20s, then reports PASS only if the process stays alive, stderr stays empty, the port listens, and (when a browser is available) the rendered page has no plugin loader errors (HARNESS overlay). Optional uiChecks verifies plugin UI actually mounted: pass [{id, marker}] where marker is a substring expected in the rendered DOM (e.g. a data-* attribute the plugin client sets on load). Temporarily moves the task-board single-instance lock aside and restores it.',
+    parameters: {
+      uiChecks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            marker: { type: 'string' },
+          },
+        },
+        description: 'Optional plugin UI markers to verify in the rendered DOM (id + marker substring)',
+      },
+    },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute() {
-      const r = await bootCheck();
+    async execute(args: { uiChecks?: { id: string; marker: string }[] }) {
+      const r = await bootCheck(undefined, undefined, args.uiChecks ?? []);
       return [r.ok ? 'PASS' : 'FAIL', r.summary, '', r.detail].join('\n');
     },
   }));

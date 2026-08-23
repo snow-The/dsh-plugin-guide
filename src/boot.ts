@@ -59,10 +59,23 @@ function findBrowser(): string | null {
   return null;
 }
 
-/** Headless-render the booted page and look for browser-side plugin loader errors
+export interface UiCheck {
+  /** short label, e.g. 'notemap' */
+  id: string;
+  /** substring expected in the rendered DOM, e.g. 'data-notemap-mounted' */
+  marker: string;
+}
+
+interface PageRender {
+  errors: { snippet: string } | null;
+  ui: { id: string; found: boolean }[];
+}
+
+/** Headless-render the booted page, look for browser-side plugin loader errors
  *  (HARNESS overlay: "Failed to load plugins", "failed to apply loader entry",
- *  "invalid plugin, received object"). Returns null when no browser is available. */
-function pageErrorCheck(port: number): { found: boolean; snippet: string } | null {
+ *  "invalid plugin, received object") and verify plugin UI markers mounted.
+ *  Returns null when no browser is available. */
+function pageRenderCheck(port: number, uiChecks: UiCheck[]): PageRender | null {
   const browser = findBrowser();
   if (!browser) return null;
   const url = 'http://127.0.0.1:' + port;
@@ -76,12 +89,12 @@ function pageErrorCheck(port: number): { found: boolean; snippet: string } | nul
         '--dump-dom', url,
       ], { timeout: 25000, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       const m = /failed to load plugins|failed to (?:import|apply) loader entry|invalid plugin, received object|HARNESS[\s\S]{0,40}?failed to/i.exec(dom);
+      const ui = uiChecks.map((c) => ({ id: c.id, found: dom.includes(c.marker) }));
       rmSync(profile, { recursive: true, force: true });
-      if (m) {
-        const i = Math.max(0, (m.index ?? 0) - 120);
-        return { found: true, snippet: dom.slice(i, i + 360).replace(/\s+/g, ' ').trim() };
-      }
-      return { found: false, snippet: '' };
+      return {
+        errors: m ? { snippet: dom.slice(Math.max(0, m.index - 120), m.index + 240).replace(/\s+/g, ' ').trim() } : null,
+        ui,
+      };
     } catch {
       rmSync(profile, { recursive: true, force: true });
       /* browser may need retry or is unavailable — keep trying */
@@ -95,7 +108,7 @@ function pageErrorCheck(port: number): { found: boolean; snippet: string } | nul
  * @param port   cold port (default: random 34000-35999)
  * @param waitMs how long to observe the process (default 20000)
  */
-export async function bootCheck(port?: number, waitMs?: number): Promise<BootResult> {
+export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiCheck[] = []): Promise<BootResult> {
   const p = port ?? 34000 + Math.floor(Math.random() * 2000);
   const wait = waitMs ?? 20000;
   const notes: string[] = [];
@@ -130,21 +143,36 @@ export async function bootCheck(port?: number, waitMs?: number): Promise<BootRes
     const errTrim = stderr.trim();
     const listening = await portOpen(p);
     if (alive && errTrim.length === 0) {
-      const page = pageErrorCheck(p);
-      if (page && page.found) {
+      const page = pageRenderCheck(p, uiChecks);
+      if (page && page.errors) {
         return {
           ok: false,
           summary: 'FAIL: browser-side plugin loader error on http://127.0.0.1:' + p + ' (HARNESS overlay)',
-          detail: 'headless DOM matched error pattern:\n' + page.snippet + '\n--- notes ---\n' + (notes.join('\n') || '(none)'),
+          detail: 'headless DOM matched error pattern:\n' + page.errors.snippet + '\n--- notes ---\n' + (notes.join('\n') || '(none)'),
         };
       }
-      const pageNote = page === null
-        ? 'note: no chrome/edge found - browser-side HARNESS check skipped (server-side checks only)'
-        : 'note: headless page render clean (no plugin loader errors in DOM)';
+      const missing = page ? page.ui.filter((u) => !u.found) : [];
+      if (page && missing.length > 0) {
+        return {
+          ok: false,
+          summary: 'FAIL: plugin UI markers missing from rendered DOM on http://127.0.0.1:' + p,
+          detail: missing.map((u) => '  x ' + u.id + ' (marker not found)').join('\n') + '\n--- notes ---\n' + (notes.join('\n') || '(none)'),
+        };
+      }
+      const pageNotes: string[] = [];
+      if (page === null) {
+        pageNotes.push('note: no chrome/edge found - browser-side page check skipped (server-side checks only)');
+      } else {
+        pageNotes.push('note: headless page render clean (no plugin loader errors in DOM)');
+        if (uiChecks.length > 0) {
+          pageNotes.push('ui checks: ' + page.ui.map((u) => (u.found ? 'ok ' + u.id : 'MISSING ' + u.id)).join(', '));
+        }
+      }
+      const uiPart = uiChecks.length > 0 && page ? ', ui ' + page.ui.filter((u) => u.found).length + '/' + page.ui.length : '';
       return {
         ok: true,
-        summary: `PASS: dsh web alive after ${wait}ms on port ${p}, stderr empty, port ${listening ? 'listening' : 'not yet listening (may bind later)'}, page ${page ? 'DOM clean' : 'check skipped (no browser)'}`,
-        detail: notes.concat([pageNote]).join('\n') || '(no notes)',
+        summary: 'PASS: dsh web alive after ' + wait + 'ms on port ' + p + ', stderr empty, port ' + (listening ? 'listening' : 'not yet listening (may bind later)') + ', page ' + (page ? 'DOM clean' : 'check skipped (no browser)') + uiPart,
+        detail: notes.concat(pageNotes).join('\n') || '(no notes)',
       };
     }
     if (!alive) {

@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-plugin-guide",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "DSH plugin authoring guide: conformance scan (boot-safe bundling: dsh.bundle declaration, patch array, insert entries, files allowlist) + official capability map (ctx.* services, official bundles, schedule/agent/tool patterns).",
   "type": "module",
   "main": "./dist/index.js",
