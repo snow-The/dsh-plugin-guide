@@ -9,7 +9,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, renameSync } from 'node:fs';
+import { existsSync, renameSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import net from 'node:net';
@@ -43,6 +43,51 @@ function portOpen(port: number): Promise<boolean> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+const BROWSER_CANDIDATES = [
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
+];
+
+function findBrowser(): string | null {
+  for (const c of BROWSER_CANDIDATES) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+/** Headless-render the booted page and look for browser-side plugin loader errors
+ *  (HARNESS overlay: "Failed to load plugins", "failed to apply loader entry",
+ *  "invalid plugin, received object"). Returns null when no browser is available. */
+function pageErrorCheck(port: number): { found: boolean; snippet: string } | null {
+  const browser = findBrowser();
+  if (!browser) return null;
+  const url = 'http://127.0.0.1:' + port;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const profile = mkdtempSync(join(homedir(), 'AppData', 'Local', 'Temp', 'dsh-guide-boot-'));
+    try {
+      const dom = execFileSync(browser, [
+        '--headless=new', '--disable-gpu', '--no-first-run',
+        '--disable-extensions', '--disable-background-networking',
+        '--user-data-dir=' + profile,
+        '--dump-dom', url,
+      ], { timeout: 25000, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const m = /failed to load plugins|failed to (?:import|apply) loader entry|invalid plugin, received object|HARNESS[\s\S]{0,40}?failed to/i.exec(dom);
+      rmSync(profile, { recursive: true, force: true });
+      if (m) {
+        const i = Math.max(0, (m.index ?? 0) - 120);
+        return { found: true, snippet: dom.slice(i, i + 360).replace(/\s+/g, ' ').trim() };
+      }
+      return { found: false, snippet: '' };
+    } catch {
+      rmSync(profile, { recursive: true, force: true });
+      /* browser may need retry or is unavailable — keep trying */
+    }
+  }
+  return null;
 }
 
 /**
@@ -85,10 +130,21 @@ export async function bootCheck(port?: number, waitMs?: number): Promise<BootRes
     const errTrim = stderr.trim();
     const listening = await portOpen(p);
     if (alive && errTrim.length === 0) {
+      const page = pageErrorCheck(p);
+      if (page && page.found) {
+        return {
+          ok: false,
+          summary: 'FAIL: browser-side plugin loader error on http://127.0.0.1:' + p + ' (HARNESS overlay)',
+          detail: 'headless DOM matched error pattern:\n' + page.snippet + '\n--- notes ---\n' + (notes.join('\n') || '(none)'),
+        };
+      }
+      const pageNote = page === null
+        ? 'note: no chrome/edge found - browser-side HARNESS check skipped (server-side checks only)'
+        : 'note: headless page render clean (no plugin loader errors in DOM)';
       return {
         ok: true,
-        summary: `PASS: dsh web alive after ${wait}ms on port ${p}, stderr empty, port ${listening ? 'listening' : 'not yet listening (may bind later)'}`,
-        detail: notes.join('\n') || '(no notes)',
+        summary: `PASS: dsh web alive after ${wait}ms on port ${p}, stderr empty, port ${listening ? 'listening' : 'not yet listening (may bind later)'}, page ${page ? 'DOM clean' : 'check skipped (no browser)'}`,
+        detail: notes.concat([pageNote]).join('\n') || '(no notes)',
       };
     }
     if (!alive) {
