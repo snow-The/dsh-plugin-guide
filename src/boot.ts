@@ -116,9 +116,15 @@ export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiChec
   let movedLock = false;
   try {
     if (existsSync(TASKBOARD_LOCK)) {
-      renameSync(TASKBOARD_LOCK, TASKBOARD_BAK);
-      movedLock = true;
-      notes.push('note: task-board single-instance lock temporarily moved aside (restored after check)');
+      try {
+        renameSync(TASKBOARD_LOCK, TASKBOARD_BAK);
+        movedLock = true;
+        notes.push('note: task-board single-instance lock temporarily moved aside (restored after check)');
+      } catch (lockErr) {
+        // lock is held open by the running main instance (EPERM/EBUSY on Windows)
+        // -> skip moving it and continue; the probe instance may still boot
+        notes.push('note: task-board lock is held by the live instance - left in place, proceeding without lock move');
+      }
     }
     child = spawn('dsh', ['web', '--port', String(p), '--no-open'], {
       shell: true,
