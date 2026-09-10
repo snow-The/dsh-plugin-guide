@@ -14,6 +14,10 @@
  *   7. `main` / `types` must resolve to existing files.
  *   8. The bundled entry module should export `name` and `apply` (static probe
  *      of the built dist text when present).
+ *   10. (advisory) test discipline: a runnable `scripts.test` AND actual test files.
+ *      A missing script, or a script with nothing to run, both mean no safety net - but
+ *      they do not stop a plugin from booting, so this is reported without failing the
+ *      conformance verdict. A fuzz script is advisory too.
  *   9. Every `ctx.<service>` read of a host-registered service must be declared
  *      in `export const inject` (cordis proxy throws "cannot get property X
  *      without inject" at apply time; optional chaining does not help).
@@ -33,7 +37,7 @@
  *       classic deps-only trap).
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
@@ -307,7 +311,56 @@ export function scanPlugin(dir: string): ScanReport {
     }
   }
 
+  // ---- 10. test discipline ------------------------------------------------
+  // A plugin with no runnable test command has no safety net. This repository learned it
+  // the hard way: eight test files sat unwired because the suite could not even load (the
+  // host package is not installed in a fresh clone), and behind them hid a real defect -
+  // a reader that returned [] for every real session. "scripts.test exists" is not enough
+  // either: a bare `node --test` with no test files passes vacuously and proves nothing.
+  const scripts = (manifest.scripts ?? {}) as Record<string, unknown>;
+  const testScript = typeof scripts.test === 'string' ? scripts.test.trim() : '';
+  const testFiles = findTestFiles(dir);
+  // ADVISORY, not a verdict input: this scan answers "will it boot?", and a plugin with
+  // no tests still boots. Mixing the two would make FAIL ambiguous, which is exactly the
+  // signal the scanner must keep sharp. The gap is still printed, every time.
+  let testAdvice: string;
+  if (testScript.length === 0 && testFiles.length > 0) {
+    testAdvice = `advisory: ${testFiles.length} test file(s) present but no "scripts.test" - the suite is never run (add: \"test\": \"node --test test\")`;
+  } else if (testScript.length > 0 && testFiles.length === 0) {
+    testAdvice = `advisory: test script "${testScript.slice(0, 50)}" but no test files found - it passes vacuously`;
+  } else if (testScript.length === 0) {
+    testAdvice = 'advisory: no tests at all - nothing guards this plugin against regressions';
+  } else {
+    testAdvice = `advisory: ${testFiles.length} test file(s); test script: ${testScript.slice(0, 50)}`;
+  }
+  checks.push({ rule: 'scripts.test', ok: true, detail: testAdvice });
+  const fuzzScript = typeof scripts.fuzz === 'string' ? scripts.fuzz.trim() : '';
+  checks.push({
+    rule: 'scripts.fuzz',
+    ok: true,
+    detail: fuzzScript.length > 0
+      ? `advisory: fuzz script: ${fuzzScript.slice(0, 60)}`
+      : 'advisory: no "scripts.fuzz" (recommended for anything that parses external input)',
+  });
+
   return finish(dir, packageName, checks);
+}
+
+/** Shallow test-file discovery: root, test/ and tests/, common naming conventions. */
+function findTestFiles(dir: string): string[] {
+  const found: string[] = [];
+  const looksLikeTest = (name: string): boolean =>
+    /\.(test|spec)\.[cm]?[jt]sx?$/.test(name) || /^test[-.].*\.[cm]?[jt]sx?$/.test(name) || /.test\.mjs$/.test(name);
+  for (const sub of ['', 'test', 'tests']) {
+    const target = sub === '' ? dir : join(dir, sub);
+    if (!existsSync(target)) continue;
+    let entries: string[] = [];
+    try { entries = readdirSync(target); } catch { continue; }
+    for (const name of entries) {
+      if (looksLikeTest(name) || (sub !== '' && /\.(mjs|cjs|js|ts)$/.test(name))) found.push(sub === '' ? name : sub + '/' + name);
+    }
+  }
+  return found;
 }
 
 /**

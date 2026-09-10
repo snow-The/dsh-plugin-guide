@@ -378,3 +378,55 @@ test('a plugin that merely forgot dsh.bundle still FAILS (library shortcut must 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('test discipline is advisory and names the real gap (script without tests)', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({ scripts: { test: 'node --test' } }),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': 'export const name = "@snow-the/dsh-fixture";\nexport function apply() {}\n',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: PASS/, 'a missing safety net must not fail a boot scan');
+    assert.match(out, /scripts\.test: advisory: .*passes vacuously/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('test discipline flags test files that never run', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({}),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': 'export const name = "@snow-the/dsh-fixture";\nexport function apply() {}\n',
+    'test/orphan.test.mjs': "import { test } from 'node:test';\ntest('x', () => {});\n",
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /scripts\.test: advisory: 1 test file\(s\) present but no "scripts\.test"/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plugin with tests and a script reports them, and fuzz stays advisory', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({ scripts: { test: 'node --test test/', fuzz: 'node test/fuzz.mjs' } }),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': 'export const name = "@snow-the/dsh-fixture";\nexport function apply() {}\n',
+    'test/real.test.mjs': "import { test } from 'node:test';\ntest('x', () => {});\n",
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /scripts\.test: advisory: 1 test file\(s\)/);
+    assert.match(out, /scripts\.fuzz: advisory: fuzz script/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
