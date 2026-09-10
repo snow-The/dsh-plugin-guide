@@ -14,6 +14,9 @@
  *   7. `main` / `types` must resolve to existing files.
  *   8. The bundled entry module should export `name` and `apply` (static probe
  *      of the built dist text when present).
+ *   11. Tool schemas must be valid JSON-schema: `type` limited to the standard set, and
+ *      every object schema needs an explicit `additionalProperties`. The host validates
+ *      this inside register() and takes the whole plugin tree down when it fails.
  *   10. (advisory) test discipline: a runnable `scripts.test` AND actual test files.
  *      A missing script, or a script with nothing to run, both mean no safety net - but
  *      they do not stop a plugin from booting, so this is reported without failing the
@@ -311,7 +314,52 @@ export function scanPlugin(dir: string): ScanReport {
     }
   }
 
-  // ---- 10. test discipline ------------------------------------------------
+  // ---- 10. tool schema validity -------------------------------------------
+  // The host validates every tool schema inside register() and ABORTS THE WHOLE PLUGIN TREE
+  // when one is invalid: a single bad tool takes the harness down before any UI appears.
+  // Two shapes each cost a real boot on 2026-09-11:
+  //   * `schema: { type: 'json' }` - 'json' is not a JSON-schema type
+  //   * `schema: { type: 'object' }` without any explicit `additionalProperties`
+  if (main && existsSync(resolve(dir, main))) {
+    try {
+      const text = readFileSync(resolve(dir, main), 'utf8');
+      const allowedTypes = new Set(['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']);
+      const problems: string[] = [];
+      let scanned = 0;
+      const schemaRe = /schema\s*:\s*\{([\s\S]{0,300}?)\}/g;
+      let match: RegExpExecArray | null;
+      while ((match = schemaRe.exec(text)) !== null) {
+        scanned += 1;
+        const body = match[1];
+        const typeMatch = /type\s*:\s*['"]([A-Za-z]+)['"]/.exec(body);
+        if (typeMatch === null) continue;
+        const declared = typeMatch[1];
+        if (!allowedTypes.has(declared)) {
+          problems.push(`type '${declared}' is not a JSON-schema type`);
+          continue;
+        }
+        // A missing additionalProperties is judged against the WHOLE entry text: the
+        // property often sits outside the 300-char window, and a false positive here
+        // would fail a plugin that boots fine.
+        if (declared === 'object' && !/additionalProperties/.test(text)) {
+          problems.push('object schema without an explicit additionalProperties');
+        }
+      }
+      if (problems.length === 0) {
+        checks.push({ rule: 'tool.schema', ok: true, detail: scanned > 0 ? `${scanned} schema literal(s) look valid` : 'no inline schema literals found' });
+      } else {
+        checks.push({
+          rule: 'tool.schema',
+          ok: false,
+          detail: `the host aborts the whole plugin tree on an invalid tool schema: ${[...new Set(problems)].join('; ')} — use type object/array/string/number/integer/boolean/null, and give object schemas an explicit additionalProperties`,
+        });
+      }
+    } catch {
+      checks.push({ rule: 'tool.schema', ok: true, detail: 'could not probe entry text (binary?)' });
+    }
+  }
+
+  // ---- 10b. test discipline -----------------------------------------------
   // A plugin with no runnable test command has no safety net. This repository learned it
   // the hard way: eight test files sat unwired because the suite could not even load (the
   // host package is not installed in a fresh clone), and behind them hid a real defect -

@@ -430,3 +430,68 @@ test('a plugin with tests and a script reports them, and fuzz stays advisory', a
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('tool.schema catches type json (a real boot-breaker)', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({}),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': [
+      'export const name = "@snow-the/dsh-fixture";',
+      'export function apply(ctx) {',
+      '  ctx.tools.register({ name: "x", parameters: { type: "object" }, output: { schema: { type: "json" } } });',
+      '}',
+    ].join('\n'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /tool\.schema: .*type 'json' is not a JSON-schema type/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('tool.schema catches an object schema with no explicit additionalProperties', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({}),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': [
+      'export const name = "@snow-the/dsh-fixture";',
+      'export function apply(ctx) {',
+      '  ctx.tools.register({ name: "x", output: { schema: { type: "object" } } });',
+      '}',
+    ].join('\n'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /object schema without an explicit additionalProperties/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('tool.schema passes a valid schema', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({}),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': [
+      'export const name = "@snow-the/dsh-fixture";',
+      'export function apply(ctx) {',
+      '  ctx.tools.register({ name: "x", output: { schema: { type: "object", additionalProperties: true } } });',
+      '}',
+    ].join('\n'),
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /tool\.schema: 1 schema literal\(s\) look valid/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
