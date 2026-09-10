@@ -57,7 +57,8 @@ export interface ScanReport {
   checks: CheckResult[];
   passed: number;
   failed: number;
-  verdict: 'PASS' | 'FAIL';
+  /** N/A = the package is not a DSH plugin at all (a library), so plugin rules do not apply. */
+  verdict: 'PASS' | 'FAIL' | 'N/A';
 }
 
 export function scanPlugin(dir: string): ScanReport {
@@ -78,6 +79,23 @@ export function scanPlugin(dir: string): ScanReport {
   } catch (e) {
     checks.push({ rule: 'manifest', ok: false, detail: `invalid JSON: ${String(e)}` });
     return finish(dir, packageName, checks);
+  }
+
+  // ---- 0b. is this a DSH plugin at all? ----------------------------------
+  // A shared library deliberately has no bundle. Reporting it as a failing plugin
+  // (which is what happened to @snow-the/goroutine: four FAILs for something that is
+  // not a plugin) is a false alarm that trains people to ignore the scanner. The
+  // distinguishing signal is the absence of EVERY plugin marker. A plugin that merely
+  // forgot its dsh.bundle still carries a patch file or a host dependency, so it keeps
+  // failing exactly as before.
+  const deps = { ...(manifest.dependencies as Record<string, unknown> | undefined), ...(manifest.peerDependencies as Record<string, unknown> | undefined) };
+  const hasHostDep = Object.keys(deps).some((d) => d.startsWith('@deepseek-ai/dsh-'));
+  const hasPatchFile = existsSync(join(dir, 'cordis.patch.yml'));
+  if (manifest.dsh === undefined && !hasPatchFile && !hasHostDep) {
+    checks.push({ rule: 'manifest.library', ok: true, detail: 'no dsh field, no cordis.patch.yml, no @deepseek-ai/dsh-* dependency — treated as a library, plugin rules do not apply' });
+    const report = finish(dir, packageName, checks);
+    report.verdict = 'N/A';
+    return report;
   }
 
   // ---- 1. dsh.bundle declaration -----------------------------------------
@@ -187,11 +205,23 @@ export function scanPlugin(dir: string): ScanReport {
   if (!Array.isArray(files)) {
     checks.push({ rule: 'files', ok: false, detail: 'no "files" allowlist — npm publish may ship src/, node_modules or other junk' });
   } else {
-    const problems: string[] = [];
-    if (!files.includes('dist')) problems.push('dist');
-    if (patchRel && !files.includes(patchRel.replace(/^\.\//, ''))) problems.push(patchRel);
+    // Required entries are DERIVED from the manifest, never hardcoded: a plugin may
+    // ship dist/, lib/, or a root index.js, and flagging a layout the loader happily
+    // boots is a false failure (three of our own plugins were flagged this way).
+    // What matters is that whatever main/types/client/patch point at is published.
+    const required = new Set<string>();
+    const addTop = (rel: unknown): void => {
+      if (typeof rel !== 'string' || rel.length === 0) return;
+      const segment = rel.replace(/^\.\//, '').split('/')[0];
+      if (segment.length > 0 && segment !== '.') required.add(segment);
+    };
+    addTop(manifest.main);
+    addTop(manifest.types);
+    addTop(patchRel);
+    if (existsSync(join(dir, 'client.js'))) addTop('client.js');
+    const problems = [...required].filter((entry) => !files.includes(entry));
     if (problems.length === 0) {
-      checks.push({ rule: 'files', ok: true, detail: 'files allowlist includes dist and the patch file' });
+      checks.push({ rule: 'files', ok: true, detail: `files allowlist ships every entry point (${[...required].join(', ')})` });
     } else {
       checks.push({ rule: 'files', ok: false, detail: `files allowlist missing: ${problems.join(', ')}` });
     }
@@ -405,7 +435,7 @@ export function formatReport(report: ScanReport): string {
   const lines: string[] = [];
   lines.push(`# scan ${report.dir}`);
   lines.push(`package: ${report.packageName ?? '(unknown)'}`);
-  lines.push(`verdict: ${report.verdict} (${report.passed} pass / ${report.failed} fail)`);
+  lines.push(`verdict: ${report.verdict} (${report.passed} pass / ${report.failed} fail)${report.verdict === 'N/A' ? ' — not a DSH plugin' : ''}`);
   for (const c of report.checks) {
     lines.push(`  ${c.ok ? '✓' : '✗'} ${c.rule}: ${c.detail}`);
   }

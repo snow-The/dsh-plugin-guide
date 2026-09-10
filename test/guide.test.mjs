@@ -302,3 +302,79 @@ test('guide_scan profile mode exempts host-provided official layers (dsh-base / 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/** Manifest builder for the files-rule fixtures (a plugin shipping lib/, not dist/). */
+const fixtureManifest = (extra) => JSON.stringify({
+  name: '@snow-the/dsh-fixture', version: '0.0.1', type: 'module',
+  main: './lib/index.js', files: ['lib', 'cordis.patch.yml'],
+  dsh: { bundle: { patch: './cordis.patch.yml' } },
+  ...extra,
+}, null, 2);
+
+test('files rule judges the manifest entry points, not a hardcoded dist/', async () => {
+  // three of our own plugins ship lib/ or a root index.js and were falsely flagged
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({}),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': 'export const name = "@snow-the/dsh-fixture";\nexport function apply() {}\n',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: PASS/);
+    assert.match(out, /files allowlist ships every entry point/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('files rule still fails when the allowlist really omits an entry point', async () => {
+  const dir = await makeFixture({
+    'package.json': fixtureManifest({ files: ['cordis.patch.yml'] }),
+    'cordis.patch.yml': "- insert:\n    - id: dsh-fixture\n      name: '@snow-the/dsh-fixture'\n",
+    'lib/index.js': 'export const name = "@snow-the/dsh-fixture";\n',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /files allowlist missing: lib/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a package with no plugin markers at all is reported as N/A, not FAIL', async () => {
+  const dir = await makeFixture({
+    'package.json': JSON.stringify({ name: '@snow-the/goroutine', version: '0.1.1', type: 'module', main: './src/index.js', files: ['src'] }, null, 2),
+    'src/index.js': 'export function pool() {}\n',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: N\/A/);
+    assert.match(out, /treated as a library/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plugin that merely forgot dsh.bundle still FAILS (library shortcut must not swallow it)', async () => {
+  const dir = await makeFixture({
+    'package.json': JSON.stringify({ name: '@snow-the/dsh-forgot', version: '0.0.1', main: './index.js', files: ['index.js', 'cordis.patch.yml'] }, null, 2),
+    'cordis.patch.yml': '- insert:\n    - id: dsh-forgot\n      name: \'@snow-the/dsh-forgot\'\n',
+    'index.js': 'export const name = "@snow-the/dsh-forgot";\n',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /verdict: FAIL/);
+    assert.match(out, /must declare "dsh"/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
