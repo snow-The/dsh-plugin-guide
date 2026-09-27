@@ -14,7 +14,9 @@
     "build": "tsc --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --external:yaml",
     "prepare": "pnpm build",
     "test": "node --test --test-concurrency=1",
-    "fuzz": "node test/fuzz-scan.mjs --iters=200"
+    "fuzz": "node test/fuzz-scan.mjs --iters=200",
+    "gen:catalog": "node scripts/gen-ctx-catalog.mjs",
+    "check:catalog": "node scripts/gen-ctx-catalog.mjs --check"
   },
   "keywords": [
     "dsh",

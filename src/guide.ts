@@ -9,12 +9,20 @@
  * This is the "learn how to use dsh properly" half of dsh-plugin-guide.
  */
 
+import { GENERATED_CTX_CATALOG } from './ctx-catalog.generated.ts';
+import { CTX_NOTES } from './ctx-notes.ts';
+
 export interface CtxService {
   member: string;
-  pkg: string;
+  /** Official package that mounts the service. Omitted when unverified — never guessed. */
+  pkg?: string;
   type: string;
   what: string;
   example: string;
+  /** Authoritative subsystem id from the official cordis-catalog (docs/subsystems/*). */
+  subsystem?: string;
+  /** 官方标注为 (abstract seam): 定义契约, 能力面取决于挂了哪个后端实现。 */
+  seam?: boolean;
 }
 
 export interface BundleRow {
@@ -34,22 +42,36 @@ export interface Topic {
 // ctx.* service map (verified against lib/types/index.d.ts of each package)
 // ---------------------------------------------------------------------------
 
-export const CTX_SERVICES: CtxService[] = [
-  { member: 'ctx.llm', pkg: '@deepseek-ai/dsh-llm', type: 'LlmRuntime', what: 'LLM 通道:发起 chat/completions 推理', example: "ctx.llm.chat({ messages }) 或经 hostLlm 适配" },
-  { member: 'ctx.agents / ctx.agent', pkg: '@deepseek-ai/dsh-agent', type: 'AgentRegistry / Agent', what: 'Agent 注册表与当前 agent(作用域隔离的服务树)', example: 'ctx.agent 取当前会话 agent;ctx.agents 遍历' },
-  { member: 'ctx.skills', pkg: '@deepseek-ai/dsh-skill', type: 'SkillRegistry', what: '技能注册/查询(skill 目录、SKILL.md 加载)', example: 'ctx.skills 枚举可加载技能' },
-  { member: 'ctx.tools', pkg: '@deepseek-ai/dsh-tools', type: 'ToolRuntime', what: '工具注册中心:defineTool + register', example: "ctx.tools.register(defineTool({ name, description, parameters, execute }))" },
-  { member: 'ctx.sessions', pkg: '@deepseek-ai/dsh-session', type: 'SessionStore', what: '会话存储(事件日志、消息读写)', example: 'ctx.sessions 读写当前会话历史' },
-  { member: 'ctx.settings', pkg: '@deepseek-ai/dsh-settings', type: 'SettingsProvider', what: '设置读写(用户配置面板联动)', example: 'ctx.settings 定义/读取插件配置项' },
-  { member: 'ctx.storage', pkg: '@deepseek-ai/dsh-storage', type: 'Storage', what: '键值/领域存储(跨会话持久化)', example: 'ctx.storage 存插件状态(替代自建文件)' },
-  { member: 'ctx.jobs', pkg: '@deepseek-ai/dsh-jobs', type: 'JobRegistry', what: '后台任务(长时运行、可跟踪、防宿主退出丢失)', example: 'ctx.jobs 提交/查询后台 job' },
-  { member: 'ctx.goals', pkg: '@deepseek-ai/dsh-goal', type: 'GoalService', what: '目标(长周期目标状态机、自动续轮)', example: 'ctx.goals 注册/推进 goal' },
-  { member: 'ctx.workflowEngine', pkg: '@deepseek-ai/dsh-workflow', type: 'WorkflowEngine', what: '工作流引擎(多 agent 编排)', example: 'ctx.workflowEngine 派发 workflow' },
-  { member: 'ctx.subagents', pkg: '@deepseek-ai/dsh-subagent', type: 'SubagentRuntime', what: '子代理(后台派发、fork、控制)', example: 'ctx.subagents 起后台 subagent' },
-  { member: 'ctx.credentials', pkg: '@deepseek-ai/dsh-credentials', type: 'CredentialProvider', what: '凭证管理(密钥安全存取,不落明文)', example: 'ctx.credentials 读取第三方 API key' },
-  { member: 'ctx.fs', pkg: '@deepseek-ai/dsh-fs', type: 'FileSystem', what: '文件系统抽象(沙箱感知的读写)', example: 'ctx.fs 读写文件(经沙箱策略)' },
-  { member: 'ctx.userQuestions', pkg: '@deepseek-ai/dsh-user-questions', type: 'UserQuestionService', what: '向用户提问/确认(阻塞等答复)', example: 'ctx.userQuestions 发起 ask_user 式提问' },
-];
+/**
+ * ctx.* 服务目录 = 官方生成目录 + 手写说明的合并。
+ *
+ *   GENERATED_CTX_CATALOG (src/ctx-catalog.generated.ts)
+ *     成员 / 类型 / 子系统 / seam —— 由 scripts/gen-ctx-catalog.mjs 从官方
+ *     docs/subsystems/*.md 的 cordis-catalog 区块生成, 跟着官方走, 不会腐化。
+ *   CTX_NOTES (src/ctx-notes.ts)
+ *     中文说明 / 示例 / 官方包名 —— 需要人判断, 手写。
+ *
+ * 合并规则: 以生成目录为【全集】(官方新增任何服务都会自动出现),
+ *           手写说明按 member 覆盖上去; 说明缺失时回退到 subsystem。
+ *
+ * 历史教训: 这个表原先是手抄的, 只抄了 14 项而官方有 90 项, 于是插件作者
+ *           看不到 sessionQuery/storageDomain/spillStore/tokenMeter 等能力,
+ *           继续自建官方已有的东西。所以现在改为生成。
+ */
+const NOTE_BY_MEMBER = new Map(CTX_NOTES.map((n) => [n.member, n]));
+
+export const CTX_SERVICES: CtxService[] = GENERATED_CTX_CATALOG.map((g) => {
+  const note = NOTE_BY_MEMBER.get(g.member);
+  return {
+    member: g.member,
+    ...(note?.pkg ? { pkg: note.pkg } : {}),
+    type: g.type,
+    subsystem: g.subsystem,
+    ...(g.seam ? { seam: true } : {}),
+    what: note?.what ?? `(官方 ${g.subsystem} 子系统服务; 说明待补)`,
+    example: note?.example ?? `见官方 docs/subsystems/${g.subsystem}.md`,
+  };
+});
 
 export const SCHEDULE_NOTE = [
   '排程(dsh-schedule):不是 ctx 成员,而是 function-plugin(name="schedule")',
@@ -156,18 +178,24 @@ export const TOPICS: Topic[] = [
     title: 'Agent 框架(ctx.agents / subagents / workflow)',
     body: [
       'ctx.agents:AgentRegistry — 注册/获取 agent;每个 agent 有独立作用域服务树。',
-      'ctx.subagents:SubagentRuntime — 后台派发子代理(对应宿主 subagent 工具)。',
+      'ctx.subagents:SubagentRuntime — 命名 provider 注册表(spawn/fork/acp/codex/claude-code/dsh-sdk)+ 一次性派发 +',
+      '  持久子会话发现(listChildren/listDescendants)+ continuable 子代理(激活、冷恢复、sendMessage、interrupt)。',
+      'ctx.agentTeams:TeamService — Agent Teams:每个普通运行时根节点都是隐式 Lead,提供名册、持久对等信箱、共享任务 DAG。',
+      '  属实验性 bundle(@deepseek-ai/dsh-experimental-agent-team-profile),未挂载时 ctx.agentTeams 不存在,必须判空。',
       'ctx.workflowEngine:WorkflowEngine — 多 agent 编排(对应宿主 workflow 工具)。',
       'ctx.goals:GoalService — 长周期目标状态机(自动续轮,对应宿主 goal 工具)。',
       '',
       '插件要派活:优先 ctx.subagents/ctx.workflowEngine,而不是自己造循环。',
-      '参考实现:@deepseek-ai/dsh-agent、@deepseek-ai/dsh-subagent 的 lib 源码。',
+      '边界:子代理 seam 不提供对等通信、稳定命名名册、共享任务所有权——这三件事由 Agent Teams 补上;',
+      '  反过来,Team profile 禁用的只是模型可见的 subagent / subagent_fork 工具,',
+      '  ctx.subagents 作为服务 API 仍是共享基础设施,插件照常可调。',
+      '参考实现:refs/dsh-src-0.1.7-rc.2 的 packages/subagent/* 与 packages/experimental/agent-team/*。',
     ].join('\n'),
   },
   {
     id: 'ctx',
     title: 'ctx.* 服务地图',
-    body: CTX_SERVICES.map((s) => `  ${s.member} (${s.pkg}) — ${s.what}\n    例:${s.example}`).join('\n'),
+    body: CTX_SERVICES.map((s) => `  ${s.member} (${s.pkg ?? s.subsystem ?? 'official'}) — ${s.what}\n    例:${s.example}`).join('\n'),
   },
   {
     id: 'official',
@@ -178,19 +206,35 @@ export const TOPICS: Topic[] = [
 
 export function learnTopic(query: string): string {
   const q = query.trim().toLowerCase();
-  // 1) exact ctx member / package match wins over the broad topic list
-  const ctxHit = CTX_SERVICES.find((s) => s.member.toLowerCase().includes(q) || s.pkg.toLowerCase().includes(q));
+  // 1) 精确的 ctx 成员 / 包名匹配优先于宽泛的 topic 列表。
+  //    匹配规则(三条都经过回归验证,改动前请先看 test 里的 topic 路由测试):
+  //      a) query 以 `ctx.` 开头 -> 按【成员前缀】匹配。不能写成"成员以 query 开头",
+  //         那样裸 `ctx` 会命中每个成员, find() 取第一条, 于是 id='ctx' 的官方服务地图
+  //         永远不可达(历史 bug)。
+  //      b) query 不以 `ctx.` 开头 -> 只允许【完全等于某成员】(如 'storage'),
+  //         否则裸 'agent' 会命中 ctx.agentTeams, 把 'agent' 主题挤掉(同样是
+  //         "主题不可达"这类 bug, 只是换了个位置)。
+  //      c) 包名子串匹配保留(如 'dsh-token-meter').
+  //    pkg 可选(未核实的条目不写), 渲染时绝不出现 undefined。
+  const pkgLabel = (s: (typeof CTX_SERVICES)[number]) => s.pkg ?? `${s.subsystem} (pkg 未核实)`;
+  const ctxHit = q.startsWith('ctx.')
+    ? CTX_SERVICES.find((s) => s.member.toLowerCase().startsWith(q))
+    : CTX_SERVICES.find((s) => s.member.toLowerCase() === q || (s.pkg ?? '').toLowerCase().includes(q));
   if (ctxHit) {
     return [
-      `# ${ctxHit.member} — ${ctxHit.pkg}`,
+      `# ${ctxHit.member} — ${pkgLabel(ctxHit)}`,
       '',
       `类型:${ctxHit.type}`,
       `用途:${ctxHit.what}`,
       `示例:${ctxHit.example}`,
     ].join('\n');
   }
-  // 2) topic ids / titles
-  const hit = TOPICS.find((t) => t.id === q || t.title.toLowerCase().includes(q) || q.includes(t.id));
+  // 2) topic ids / titles —— 精确 id 必须优先于模糊标题匹配。
+  //    否则 'ctx' 会被 title 含 "ctx.agents" 的 agent topic 抢走(它排得更前),
+  //    真正 id='ctx' 的官方服务地图永远不可达。
+  const hit =
+    TOPICS.find((t) => t.id === q) ??
+    TOPICS.find((t) => t.title.toLowerCase().includes(q) || q.includes(t.id));
   if (hit) return `# ${hit.title}\n\n${hit.body}`;
   // 3) domain catalog
   const pkgHit = DOMAIN_PACKAGES.find((d) => d.domain.includes(q) || d.pkgs.some((p) => p.includes(q)));

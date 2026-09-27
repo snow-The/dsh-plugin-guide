@@ -5,10 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { name, apply } from '../dist/index.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 function makeCtx() {
   const registered = [];
@@ -495,3 +499,55 @@ test('tool.schema passes a valid schema', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- drift guards: 服务目录必须跟着官方走, 不能再退回手抄 -------------------------
+
+test('the ctx catalog covers every member of the generated official catalog', async () => {
+  // 回归守卫: 这个表原先是手抄的, 只抄了 14 项而官方有 90 项 —— 插件作者因此看不到
+  // sessionQuery/storageDomain/spillStore/tokenMeter 等官方能力, 继续自建官方已有的东西。
+  // 该测试让"清单落后于官方"立刻变红, 而不是等到某天有人手工发现。
+  //
+  // 走真实链路(apply + guide_learn)而不是 import 内部导出, 顺便证明工具本身可用。
+  const gen = readFileSync(join(HERE, '..', 'src', 'ctx-catalog.generated.ts'), 'utf8');
+  const official = [...gen.matchAll(/member: "([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(official.length >= 80, `生成目录异常偏小: ${official.length} 条`);
+
+  const { ctx, registered } = makeCtx();
+  apply(ctx);
+  const out = await registered.find((d) => d.name === 'guide_learn').execute({ topic: 'ctx' });
+
+  const missing = official.filter((m) => !out.includes(m));
+  assert.deepEqual(missing, [], `guide_learn('ctx') 缺少官方成员: ${missing.join(', ')}`);
+
+  // 历史 bug: ctx.schedule 渲染成 "# ctx.schedule — undefined"
+  assert.doesNotMatch(out, /— undefined/, 'guide_learn 渲染出了 undefined');
+
+  // 抽查几个"当年漏掉"的关键服务确实在目录里
+  for (const key of ['ctx.sessionQuery', 'ctx.storageDomain', 'ctx.spillStore', 'ctx.tokenMeter', 'ctx.agentTeams']) {
+    assert.ok(out.includes(key), `目录缺少关键服务 ${key}`);
+  }
+});
+
+test('every declared topic id is reachable (no topic shadowed by a ctx match)', async () => {
+  // 回归守卫: 曾经 'ctx' 被 title 含 "ctx.agents" 的 agent 主题抢走, 后来修 ctx 匹配时
+  // 又反过来让 'agent' 被 ctx.agentTeams 抢走 —— 两次都是"声明的主题不可达"。
+  // 这里对【每个】登记的 topic id 断言: 传它必须拿回它自己的标题。
+  const { ctx, registered } = makeCtx();
+  apply(ctx);
+  const gl = registered.find((d) => d.name === 'guide_learn');
+
+  const ids = ['overview', 'bundle', 'schedule', 'agent', 'ctx', 'official'];
+  for (const id of ids) {
+    const out = await gl.execute({ topic: id });
+    assert.ok(
+      out.startsWith('# ') && out.length > 60,
+      `topic '${id}' 没有返回一个主题(可能被 ctx 成员匹配抢走): ${out.split('\n')[0]}`,
+    );
+    // 'ctx' 必须是服务地图本身, 而不是某个单条服务
+    if (id === 'ctx') {
+      assert.match(out, /ctx\.\* 服务地图|服务地图/, `topic 'ctx' 未返回服务地图`);
+      assert.ok(out.split('\n').filter((l) => l.startsWith('  ctx.')).length >= 80, `服务地图条目不足`);
+    }
+  }
+});
+
