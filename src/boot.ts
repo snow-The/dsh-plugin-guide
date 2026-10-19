@@ -21,11 +21,20 @@ export interface BootResult {
   ok: boolean;
   summary: string;
   detail: string;
+  /** true when some check could not run at all, so `ok` covers only what did run. */
+  partial?: boolean;
+  partialReason?: string;
 }
 
 function killTree(pid: number): void {
   try {
-    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    if (process.platform === 'win32') {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      // Negative pid targets the whole process group; fall back to the bare pid
+      // when the child was not spawned as a group leader.
+      try { process.kill(-pid, 'SIGKILL'); } catch { process.kill(pid, 'SIGKILL'); }
+    }
   } catch {
     /* already gone */
   }
@@ -45,18 +54,71 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-const BROWSER_CANDIDATES = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
-];
+/** Expand %VAR% so the candidates stay valid on any Windows locale / install root. */
+function expandEnv(p: string): string {
+  return p.replace(/%([^%]+)%/g, (_m, k: string) => process.env[k] ?? '');
+}
 
-function findBrowser(): string | null {
-  for (const c of BROWSER_CANDIDATES) {
-    if (existsSync(c)) return c;
+const BROWSER_CANDIDATES: Record<string, string[]> = {
+  win32: [
+    '%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe',
+    '%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe',
+    '%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe',
+    '%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe',
+    '%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe'
+  ],
+  darwin: [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+  ],
+  linux: [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/microsoft-edge-stable'
+  ]
+};
+
+const BROWSER_ON_PATH = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'chrome'];
+
+function fromPath(): string | null {
+  const dirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd'] : [''];
+  for (const name of BROWSER_ON_PATH) {
+    for (const d of dirs) {
+      if (!d) continue;
+      for (const ext of exts) {
+        const p = join(d, name + ext);
+        if (existsSync(p)) return p;
+      }
+    }
   }
   return null;
+}
+
+/**
+ * Resolve a Chromium-based browser for the page-side check.
+ *
+ * Order: an explicit override the caller vouches for, then this platform's usual
+ * install locations, then PATH. The previous version knew exactly four hard-coded
+ * Windows paths, so on Linux and macOS the page check skipped itself every time —
+ * and still returned a pass. A check that could not run must say so, not merge
+ * into success.
+ */
+function findBrowser(): string | null {
+  for (const key of ['DSH_PLUGIN_GUIDE_BROWSER', 'CHROME_PATH', 'PUPPETEER_EXECUTABLE_PATH']) {
+    const v = process.env[key];
+    if (v && existsSync(v)) return v;
+  }
+  for (const c of BROWSER_CANDIDATES[process.platform] ?? []) {
+    const p = expandEnv(c);
+    if (p && existsSync(p)) return p;
+  }
+  return fromPath();
 }
 
 export interface UiCheck {
@@ -175,9 +237,12 @@ export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiChec
         }
       }
       const uiPart = uiChecks.length > 0 && page ? ', ui ' + page.ui.filter((u) => u.found).length + '/' + page.ui.length : '';
+      // A pass that only covered the server side must not read as a full pass.
+      const partialReason = page === null ? 'no browser found, page-side check did not run' : null;
       return {
         ok: true,
-        summary: 'PASS: dsh web alive after ' + wait + 'ms on port ' + p + ', stderr empty, port ' + (listening ? 'listening' : 'not yet listening (may bind later)') + ', page ' + (page ? 'DOM clean' : 'check skipped (no browser)') + uiPart,
+        ...(partialReason ? { partial: true, partialReason } : {}),
+        summary: (partialReason ? 'PASS (partial: ' + partialReason + ') — ' : 'PASS: ') + 'dsh web alive after ' + wait + 'ms on port ' + p + ', stderr empty, port ' + (listening ? 'listening' : 'not yet listening (may bind later)') + ', page ' + (page ? 'DOM clean' : 'check skipped (no browser)') + uiPart,
         detail: notes.concat(pageNotes).join('\n') || '(no notes)',
       };
     }
