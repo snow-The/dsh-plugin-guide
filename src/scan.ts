@@ -150,6 +150,10 @@ export function scanPlugin(dir: string): ScanReport {
     }
   }
 
+  // Aggregator vs single-plugin bundle: declared here because both the patch rules
+  // (section 5) and the entry-export rule (section 8) need it.
+  let isBundle = false
+
   // ---- 4. entries are mappings; inserts carry id + name -------------------
   if (Array.isArray(patchList)) {
     const badEntry = patchList.findIndex((e) => typeof e !== 'object' || e === null || Array.isArray(e));
@@ -173,7 +177,15 @@ export function scanPlugin(dir: string): ScanReport {
     }
 
     // ---- 5. self-insert name matches package name --------------------------
-    if (packageName) {
+    // A **bundle** inserts OTHER packages' rows (dsh-base inserts 96 of them); the
+    // self-name rule is about a single-plugin bundle that inserts itself. Applying it
+    // to an aggregator produced three false failures on the OFFICIAL dsh-base — and a
+    // gate that fails the reference implementation cannot be trusted as a gate.
+    const isBundleDetected = inserts.length > 1 || (inserts.length > 0 && packageName !== null && !inserts.some((it) => (it as Record<string, unknown>).name === packageName));
+    isBundle = isBundleDetected
+    if (packageName && isBundle) {
+      checks.push({ rule: 'patch.selfName', ok: true, detail: `bundle: aggregates ${inserts.length} row(s) from other packages — the self-name rule does not apply` });
+    } else if (packageName) {
       const mismatched = inserts.filter((it) => (it as Record<string, unknown>).name !== packageName);
       if (mismatched.length > 0) {
         checks.push({
@@ -216,17 +228,49 @@ export function scanPlugin(dir: string): ScanReport {
     // ship dist/, lib/, or a root index.js, and flagging a layout the loader happily
     // boots is a false failure (three of our own plugins were flagged this way).
     // What matters is that whatever main/types/client/patch point at is published.
+    //
+    // Coverage is now path-aware instead of "top directory must be listed": the
+    // official dsh-base publishes `lib/index.js` (a file) rather than `lib`, and the
+    // old top-segment rule failed it. Both spellings are legitimate.
     const required = new Set<string>();
-    const addTop = (rel: unknown): void => {
+    const addRel = (rel: unknown): void => {
       if (typeof rel !== 'string' || rel.length === 0) return;
-      const segment = rel.replace(/^\.\//, '').split('/')[0];
-      if (segment.length > 0 && segment !== '.') required.add(segment);
+      const clean = rel.replace(/^\.\//, '');
+      if (clean.length > 0 && clean !== '.') required.add(clean);
     };
-    addTop(manifest.main);
-    addTop(manifest.types);
-    addTop(patchRel);
-    if (existsSync(join(dir, 'client.js'))) addTop('client.js');
-    const problems = [...required].filter((entry) => !files.includes(entry));
+    addRel(manifest.main);
+    addRel(manifest.types);
+    addRel(patchRel);
+    if (existsSync(join(dir, 'client.js'))) addRel('client.js');
+
+    // A glob entry (`lib/types/**/*.d.ts`) covers whatever it expands to; a bare
+    // directory covers everything beneath it; anything else is an exact path.
+    // Official dsh-base publishes `lib/types/**/*.d.ts` for its types, and treating
+    // that as a literal string failed it — the third false failure of the same kind.
+    const matchGlob = (pattern: string, target: string): boolean => {
+      // `**/` matches ZERO or more path segments in minimatch, so
+      // `lib/types/**/*.d.ts` covers `lib/types/index.d.ts` (no subdirectory).
+      // Translating `**` to `.*` alone demands a slash and failed the official
+      // dsh-base manifest — the exact spelling it publishes.
+      const source = pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*\//g, '\u0001')
+        .replace(/\*\*/g, '\u0000')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\u0001/g, '(?:.*/)?')
+        .replace(/\u0000/g, '.*');
+      return new RegExp(`^${source}$`).test(target);
+    };
+
+    const covered = (rel: string, patterns: unknown[]): boolean =>
+      patterns.some((raw) => {
+        if (typeof raw !== 'string') return false;
+        const q = raw.replace(/^\.\//, '');
+        if (q.includes('*')) return matchGlob(q, rel);
+        return rel === q || rel.startsWith(`${q}/`);
+      });
+
+    const problems = [...required].filter((entry) => !covered(entry, files));
     if (problems.length === 0) {
       checks.push({ rule: 'files', ok: true, detail: `files allowlist ships every entry point (${[...required].join(', ')})` });
     } else {
@@ -258,6 +302,15 @@ export function scanPlugin(dir: string): ScanReport {
       const hasApply = /\bexport\s+(?:function|const|var|let)\s+apply\b|\bapply\s*[:=(]/.test(text);
       if (hasName && hasApply) {
         checks.push({ rule: 'entry.exports', ok: true, detail: 'entry exports name + apply' });
+      } else if (isBundle) {
+        // A bundle's own module is aggregation only — the official dsh-base entry is
+        // literally `export {};`. Demanding name/apply here would fail the reference
+        // implementation, so the rule is scoped, not loosened.
+        checks.push({
+          rule: 'entry.exports',
+          ok: /export\s*\{\s*\}|export\s+default/.test(text) || (!hasName && !hasApply),
+          detail: 'bundle entry: aggregation only, no plugin exports expected',
+        });
       } else {
         const missing: string[] = [];
         if (!hasName) missing.push('name');
