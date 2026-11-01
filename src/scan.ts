@@ -176,26 +176,42 @@ export function scanPlugin(dir: string): ScanReport {
       checks.push({ rule: 'patch.insert', ok: true, detail: `${inserts.length} insert item(s), all with id + name` });
     }
 
-    // ---- 5. self-insert name matches package name --------------------------
-    // A **bundle** inserts OTHER packages' rows (dsh-base inserts 96 of them); the
-    // self-name rule is about a single-plugin bundle that inserts itself. Applying it
-    // to an aggregator produced three false failures on the OFFICIAL dsh-base — and a
-    // gate that fails the reference implementation cannot be trusted as a gate.
-    const isBundleDetected = inserts.length > 1 || (inserts.length > 0 && packageName !== null && !inserts.some((it) => (it as Record<string, unknown>).name === packageName));
-    isBundle = isBundleDetected
-    if (packageName && isBundle) {
-      checks.push({ rule: 'patch.selfName', ok: true, detail: `bundle: aggregates ${inserts.length} row(s) from other packages — the self-name rule does not apply` });
+    // ---- 5. insert name is the package itself, a declared dependency, or a host layer ----
+    // 舊寫法（`inserts.length > 1` ⇒ 一律當 bundle 豁免）讓下面那條 ok:false **永遠不可達**：
+    // 一行且名字不符也走豁免，一行且相符必然通過。而這支檔案上面自己寫著
+    // 「一條會在參考實現上失敗的閘門不能當閘門」——它變成了「一條永遠不會失敗的閘門」。
+    //
+    // 收窄成可檢驗的不變量：row 的 name 必須落在三個地方之一
+    //   ① 自己的套件名（單插件自插，正常）
+    //   ② 自己宣告過的 dependencies / peerDependencies（聚合器插自己真的依賴的東西）
+    //   ③ `@deepseek-ai/*` 宿主官方層（那由宿主負責，清單沒列不代表錯——dsh-base 就是這樣）
+    // 不在其中的 row：要嘛名字打錯，要嘛漏宣告依賴。兩種都值得被指出來，而且訊息要說清楚是哪一種。
+    const knownNames = new Set<string>(Object.keys(deps))
+    if (packageName) knownNames.add(packageName)
+    // `isBundle` 另有用途（entry.exports 對聚合器放寬：官方 dsh-base 的入口就是 `export {};`）。
+    // 它在語意上是「這個套件會插入別人的 row」，跟下面那條閘門的判準是兩件事，所以分開算。
+    isBundle = inserts.length > 1 || inserts.some((it) => {
+      const n = (it as Record<string, unknown>).name
+      return typeof n === 'string' && n !== packageName
+    })
+    const isHostLayer = (n: string) => n.startsWith('@deepseek-ai/')
+    const unknownRows = inserts
+      .map((it) => (it as Record<string, unknown>).name)
+      .filter((n): n is string => typeof n === 'string' && !knownNames.has(n) && !isHostLayer(n))
+    if (packageName && unknownRows.length > 0) {
+      checks.push({
+        rule: 'patch.selfName',
+        ok: false,
+        detail:
+          `insert name(s) ${unknownRows.map((n) => JSON.stringify(n)).join(', ')} are neither ${JSON.stringify(packageName)}, ` +
+          `a declared dependency, nor a @deepseek-ai/* host layer — a typo, or a missing declaration`,
+      })
     } else if (packageName) {
-      const mismatched = inserts.filter((it) => (it as Record<string, unknown>).name !== packageName);
-      if (mismatched.length > 0) {
-        checks.push({
-          rule: 'patch.selfName',
-          ok: false,
-          detail: `insert name(s) ${mismatched.map((m) => JSON.stringify((m as Record<string, unknown>).name)).join(', ')} differ from package name ${packageName}`,
-        });
-      } else {
-        checks.push({ rule: 'patch.selfName', ok: true, detail: `insert name matches package name ${packageName}` });
-      }
+      checks.push({
+        rule: 'patch.selfName',
+        ok: true,
+        detail: `${inserts.length} insert row(s): every name is the package itself, a declared dependency, or a host layer`,
+      })
     }
   }
 
@@ -520,6 +536,35 @@ export function scanProfile(dir: string): ScanReport {
   if (!existsSync(nmDir)) {
     checks.push({ rule: 'profile.depsInBundles', ok: true, detail: 'node_modules not installed — plugin-dependency check skipped (run pnpm install first)' });
   } else {
+    // 一個插件有兩條路會被掛上：直接列在 `dsh.profile.bundles`，或由**某個 bundle 的 patch**
+    // 以 insert row 掛載。後者正是分層的本意——profile.bundles 列的是 bundle，
+    // bundle 的 cordis.patch.yml 再逐個 insert 插件。只看 profile.bundles 會在
+    // **正確的分層配置**上報「永不掛載」（本機 17 個插件就是這樣被掛上的，而它們確實在跑）。
+    // 一條會對正常系統喊狼的閘門，很快就會被忽略——所以它必須看得見第二條路。
+    const mountedByBundle = new Set<string>();
+    for (const bundleName of bundles) {
+      const bundlePkgPath = join(nmDir, bundleName, 'package.json');
+      if (!existsSync(bundlePkgPath)) continue;
+      let bundlePkg: Record<string, unknown>;
+      try {
+        bundlePkg = JSON.parse(readFileSync(bundlePkgPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const bundleSpec = (bundlePkg.dsh as Record<string, unknown> | undefined)?.bundle as Record<string, unknown> | undefined;
+      const patchRel = typeof bundleSpec?.patch === 'string' ? bundleSpec.patch : null;
+      if (!patchRel) continue;
+      const bundlePatchPath = join(nmDir, bundleName, patchRel);
+      if (!existsSync(bundlePatchPath)) continue;
+      try {
+        for (const m of readFileSync(bundlePatchPath, 'utf8').matchAll(/name:\s*['"]([^'"]+)['"]/g)) {
+          mountedByBundle.add(m[1]);
+        }
+      } catch {
+        /* 讀不到就當這個 bundle 沒有掛任何東西 */
+      }
+    }
+
     const orphanPlugins: string[] = [];
     let inspected = 0;
     for (const name of Object.keys(deps)) {
@@ -534,7 +579,7 @@ export function scanProfile(dir: string): ScanReport {
       const isPlugin = Boolean((pkg.dsh as Record<string, unknown> | undefined)?.bundle);
       if (!isPlugin) continue; // plain library, not a bundle plugin
       inspected += 1;
-      if (!bundles.includes(name)) orphanPlugins.push(name);
+      if (!bundles.includes(name) && !mountedByBundle.has(name)) orphanPlugins.push(name);
     }
     if (orphanPlugins.length > 0) {
       checks.push({

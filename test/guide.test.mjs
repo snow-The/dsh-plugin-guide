@@ -113,51 +113,72 @@ test('guide_scan fails a comment-only patch (the exact busyloop 0.1.3 bug)', asy
   }
 });
 
-test('guide_scan exempts a single differing row as a one-row bundle', async () => {
-  // 邊界（原本這條期待 FAIL，是過期的期待）：
-  //   scan.ts:184 的判定是 inserts.length > 1 或「唯一一行 != 套件名」→ 視為聚合器，
-  //   self-name 規則不適用。理由寫在 scan.ts:180-183：對真正的聚合器套這條規則，
-  //   曾在官方 dsh-base 上造成三次假失敗。
-  //   所以在**只有一行**的情況下，「一行聚合器」與「一行打錯名字」在這份資料裡不可區分，
-  //   規則選擇放行。這條測試把放行的理由釘住，免得日後又被當成 bug 改回去。
+// `patch.selfName` 現在是一條**真的會失敗**的閘門（舊版因為「只要 >1 行就當 bundle」而永不可達）。
+// 判準：row 的 name 必須是 ① 自己 ② 自己宣告過的依賴 ③ `@deepseek-ai/*` 宿主官方層。
+// 下面四條把三個通過條件與一個失敗條件各自釘住——不然「閘門能失敗」本身也只是宣稱。
+const manifestWith = (deps) =>
+  JSON.stringify(
+    {
+      name: '@snow-the/good-plugin',
+      version: '0.1.0',
+      main: './dist/index.js',
+      types: './dist/index.d.ts',
+      files: ['dist', 'cordis.patch.yml'],
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+      ...(deps ? { dependencies: deps } : {}),
+    },
+    null,
+    2,
+  );
+
+const scanOf = async (manifest, patch) => {
   const dir = await makeFixture({
-    'package.json': GOOD_MANIFEST,
-    'cordis.patch.yml': `- insert:\n    - id: other\n      name: '@snow-the/other'\n`,
+    'package.json': manifest,
+    'cordis.patch.yml': patch,
     'dist/index.js': GOOD_ENTRY,
     'dist/index.d.ts': '',
   });
   try {
     const { ctx, registered } = makeCtx();
     apply(ctx);
-    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
-    assert.match(out, /verdict: PASS/);
-    assert.match(out, /self-name rule does not apply/);
+    return await registered.find((d) => d.name === 'guide_scan').execute({ dir });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+};
+
+test('guide_scan fails a row naming a package that is neither self nor declared', async () => {
+  // 這條在舊版是**永遠不可能失敗**的（任何 >1 行都被當 bundle 豁免）。現在它必須紅。
+  const out = await scanOf(
+    manifestWith({ '@snow-the/declared': '^1.0.0' }),
+    `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n    - id: typo\n      name: '@snow-the/not-declared'\n`,
+  );
+  assert.match(out, /verdict: FAIL/);
+  assert.match(out, /neither .*a declared dependency, nor a @deepseek-ai\/\* host layer/);
+  assert.match(out, /@snow-the\/not-declared/);
 });
 
-test('guide_scan treats any multi-row patch as a bundle (self-name branch is currently unreachable)', async () => {
-  // 這條把**現況**釘住，不是把 bug 當規格：
-  //   scan.ts:184 = inserts.length > 1 || (唯一一行名字 != 套件名)
-  //   ⇒ 只要 >1 行就是 bundle ⇒ exempt；只有 1 行且名字相符才會走到 else；
-  //   而 else 裡「名字不符」的判定在 1 行時已被前一個條件吃掉 ⇒ patch.selfName: ok:false **不可達**。
-  // 已在 ~/.dsh/_p0/WORK-QUEUE.md 記為待決設計問題（一條永不失敗的規則不是閘門）。
-  // 這條測試的用途：等哪天有人修好判定，它會紅 —— 紅了就去改這條測試，順便確認新規則真的抓得到。
-  const dir = await makeFixture({
-    'package.json': GOOD_MANIFEST,
-    'cordis.patch.yml': `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n    - id: other\n      name: '@snow-the/other'\n`,
-    'dist/index.js': GOOD_ENTRY,
-    'dist/index.d.ts': '',
-  });
-  try {
-    const { ctx, registered } = makeCtx();
-    apply(ctx);
-    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
-    assert.match(out, /self-name rule does not apply/);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+test('guide_scan allows a row naming a declared dependency (a real aggregator)', async () => {
+  const out = await scanOf(
+    manifestWith({ '@snow-the/aggregated': '^1.0.0' }),
+    `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n    - id: aggregated\n      name: '@snow-the/aggregated'\n`,
+  );
+  assert.match(out, /verdict: PASS/);
+  assert.match(out, /every name is the package itself, a declared dependency, or a host layer/);
+});
+
+test('guide_scan allows an undeclared @deepseek-ai/* host layer (dsh-base is the reference case)', async () => {
+  // 官方層由宿主負責；清單沒列不代表錯。舊註解記的就是「對 dsh-base 套錯規則產生三次假失敗」。
+  const out = await scanOf(
+    manifestWith({}),
+    `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n    - id: web\n      name: '@deepseek-ai/dsh-web'\n`,
+  );
+  assert.match(out, /verdict: PASS/);
+});
+
+test('guide_scan accepts a single self-insert row', async () => {
+  const out = await scanOf(manifestWith({}), `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n`);
+  assert.match(out, /verdict: PASS/);
 });
 
 test('guide_scan handles a missing directory gracefully', async () => {
