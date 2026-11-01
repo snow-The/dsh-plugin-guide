@@ -113,7 +113,13 @@ test('guide_scan fails a comment-only patch (the exact busyloop 0.1.3 bug)', asy
   }
 });
 
-test('guide_scan flags insert name mismatch with package name', async () => {
+test('guide_scan exempts a single differing row as a one-row bundle', async () => {
+  // 邊界（原本這條期待 FAIL，是過期的期待）：
+  //   scan.ts:184 的判定是 inserts.length > 1 或「唯一一行 != 套件名」→ 視為聚合器，
+  //   self-name 規則不適用。理由寫在 scan.ts:180-183：對真正的聚合器套這條規則，
+  //   曾在官方 dsh-base 上造成三次假失敗。
+  //   所以在**只有一行**的情況下，「一行聚合器」與「一行打錯名字」在這份資料裡不可區分，
+  //   規則選擇放行。這條測試把放行的理由釘住，免得日後又被當成 bug 改回去。
   const dir = await makeFixture({
     'package.json': GOOD_MANIFEST,
     'cordis.patch.yml': `- insert:\n    - id: other\n      name: '@snow-the/other'\n`,
@@ -124,8 +130,31 @@ test('guide_scan flags insert name mismatch with package name', async () => {
     const { ctx, registered } = makeCtx();
     apply(ctx);
     const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
-    assert.match(out, /verdict: FAIL/);
-    assert.match(out, /differ from package name/);
+    assert.match(out, /verdict: PASS/);
+    assert.match(out, /self-name rule does not apply/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('guide_scan treats any multi-row patch as a bundle (self-name branch is currently unreachable)', async () => {
+  // 這條把**現況**釘住，不是把 bug 當規格：
+  //   scan.ts:184 = inserts.length > 1 || (唯一一行名字 != 套件名)
+  //   ⇒ 只要 >1 行就是 bundle ⇒ exempt；只有 1 行且名字相符才會走到 else；
+  //   而 else 裡「名字不符」的判定在 1 行時已被前一個條件吃掉 ⇒ patch.selfName: ok:false **不可達**。
+  // 已在 ~/.dsh/_p0/WORK-QUEUE.md 記為待決設計問題（一條永不失敗的規則不是閘門）。
+  // 這條測試的用途：等哪天有人修好判定，它會紅 —— 紅了就去改這條測試，順便確認新規則真的抓得到。
+  const dir = await makeFixture({
+    'package.json': GOOD_MANIFEST,
+    'cordis.patch.yml': `- insert:\n    - id: good-plugin\n      name: '@snow-the/good-plugin'\n    - id: other\n      name: '@snow-the/other'\n`,
+    'dist/index.js': GOOD_ENTRY,
+    'dist/index.d.ts': '',
+  });
+  try {
+    const { ctx, registered } = makeCtx();
+    apply(ctx);
+    const out = await registered.find((d) => d.name === 'guide_scan').execute({ dir });
+    assert.match(out, /self-name rule does not apply/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

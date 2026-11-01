@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --external:yaml",
     "prepare": "pnpm build",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --import ./test/resolve-stub.mjs --test --test-concurrency=1",
     "fuzz": "node test/fuzz-scan.mjs --iters=200",
     "gen:catalog": "node scripts/gen-ctx-catalog.mjs",
     "check:catalog": "node scripts/gen-ctx-catalog.mjs --check"
@@ -44,7 +44,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@types/node": "^22.20.1",
     "esbuild": "^0.24.2",
     "typescript": "^5.9.3"
@@ -54,6 +54,6 @@
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1"
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+    "dsh": ">=0.2.1-rc.2"
   }
 }
