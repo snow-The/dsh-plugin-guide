@@ -16,6 +16,10 @@ import { bootCheck } from './boot.ts';
 import { formatReport, scan } from './scan.ts';
 import { learnTopic } from './guide.ts';
 
+// 對外匯出 boot 檢查的兩個關鍵契約（token 抽取、boot 結果），讓測試能把「GUI 帶著鑑權」
+// 這件事釘住 —— 2026-11-07 的誤報正是因為這條契約沒有測試守著。
+export { bootCheck, extractToken, selfEngine } from './boot.ts';
+
 export const name = 'dsh-plugin-guide';
 export const inject = ['tools'];
 

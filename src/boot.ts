@@ -17,6 +17,43 @@ import net from 'node:net';
 const TASKBOARD_LOCK = join(homedir(), '.dsh', 'task-board', 'ledger-v2.lock');
 const TASKBOARD_BAK = TASKBOARD_LOCK + '.guide-boot-bak';
 
+/**
+ * Which executable should boot the probe instance.
+ *
+ * Booting "whatever `dsh` is on PATH" is wrong twice over:
+ *  1. on Windows it needs `shell:true`, so every argument goes through cmd.exe —
+ *     today they are all internal literals, but that is the shape that turns any
+ *     future agent-influenced value into an injection;
+ *  2. the PATH `dsh` may be a **different release** than the one loading this
+ *     plugin, and a boot check against another version proves nothing about the
+ *     engine we are actually running on.
+ *
+ * `process.argv[1]` is this host's own `…/dsh/lib/bin.js`, so spawning it with
+ * the running node binary checks exactly the engine we are running on, with no
+ * shell involved. When that cannot be recognised we fall back to the PATH shim
+ * (which does need a shell on Windows) and say so in `why` — a silent fallback
+ * would read as "verified" when it is not.
+ *
+ * @param argv1 - this host's script path (defaults to `process.argv[1]`; a
+ *   parameter so the fallback branch is testable without faking a process).
+ */
+export function selfEngine(argv1: string = process.argv[1] ?? ''): { cmd: string; args: string[]; shell: boolean; why: string } {
+  if (/[\\/]dsh[\\/]lib[\\/]bin\.js$/.test(argv1) && existsSync(argv1)) {
+    return {
+      cmd: process.execPath,
+      args: [argv1],
+      shell: false,
+      why: 'the same engine that runs this host (' + argv1 + ')',
+    };
+  }
+  return {
+    cmd: 'dsh',
+    args: [],
+    shell: true,
+    why: 'the PATH shim — this host\'s bin.js was not identifiable (argv[1]=' + JSON.stringify(argv1) + '), so the check may not cover the running release',
+  };
+}
+
 export interface BootResult {
   ok: boolean;
   summary: string;
@@ -131,16 +168,28 @@ export interface UiCheck {
 interface PageRender {
   errors: { snippet: string } | null;
   ui: { id: string; found: boolean }[];
+  /** The page we rendered was the authentication wall, not the app. */
+  authWall: boolean;
+}
+
+/** Extract the token the host prints as `dsh web: http://127.0.0.1:<port>/?token=<t>`. */
+export function extractToken(stdout: string): string | null {
+  const m = /[?&]token=([A-Za-z0-9_\-]+)/.exec(stdout);
+  return m ? m[1] : null;
 }
 
 /** Headless-render the booted page, look for browser-side plugin loader errors
  *  (HARNESS overlay: "Failed to load plugins", "failed to apply loader entry",
  *  "invalid plugin, received object") and verify plugin UI markers mounted.
  *  Returns null when no browser is available. */
-function pageRenderCheck(port: number, uiChecks: UiCheck[]): PageRender | null {
+function pageRenderCheck(port: number, uiChecks: UiCheck[], token?: string | null): PageRender | null {
   const browser = findBrowser();
   if (!browser) return null;
-  const url = 'http://127.0.0.1:' + port;
+  // GUI 是帶鑑權的：裸 `http://127.0.0.1:<port>` 回 401 + 68 bytes 的
+  // "dsh web authentication required" 頁 —— 渲染「那面牆」會讓每個 client 外掛看起來都
+  // 不存在（app 根本沒啟動，不可能有任何 marker）。token 宿主印在 stdout 上，
+  // 不帶它，整個 page-side 檢查量的只是登入頁。2026-11-07 實測：no-token → 401/68 bytes。
+  const url = 'http://127.0.0.1:' + port + (token ? '/?token=' + encodeURIComponent(token) : '');
   for (let attempt = 0; attempt < 3; attempt++) {
     const profile = mkdtempSync(join(homedir(), 'AppData', 'Local', 'Temp', 'dsh-guide-boot-'));
     try {
@@ -152,10 +201,12 @@ function pageRenderCheck(port: number, uiChecks: UiCheck[]): PageRender | null {
       ], { timeout: 25000, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       const m = /failed to load plugins|failed to (?:import|apply) loader entry|invalid plugin, received object|HARNESS[\s\S]{0,40}?failed to/i.exec(dom);
       const ui = uiChecks.map((c) => ({ id: c.id, found: dom.includes(c.marker) }));
+      const authWall = /dsh web authentication required|reopen the URL printed by dsh web/i.test(dom);
       rmSync(profile, { recursive: true, force: true });
       return {
         errors: m ? { snippet: dom.slice(Math.max(0, m.index - 120), m.index + 240).replace(/\s+/g, ' ').trim() } : null,
         ui,
+        authWall,
       };
     } catch {
       rmSync(profile, { recursive: true, force: true });
@@ -188,8 +239,10 @@ export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiChec
         notes.push('note: task-board lock is held by the live instance - left in place, proceeding without lock move');
       }
     }
-    child = spawn('dsh', ['web', '--port', String(p), '--no-open'], {
-      shell: true,
+    const engine = selfEngine();
+    notes.push('note: booting ' + engine.why);
+    child = spawn(engine.cmd, [...engine.args, 'web', '--port', String(p), '--no-open'], {
+      shell: engine.shell,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -211,12 +264,25 @@ export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiChec
     const errTrim = stderr.trim();
     const listening = await portOpen(p);
     if (alive && errTrim.length === 0) {
-      const page = pageRenderCheck(p, uiChecks);
+      const token = extractToken(stdout);
+      const page = pageRenderCheck(p, uiChecks, token);
       if (page && page.errors) {
         return {
           ok: false,
           summary: 'FAIL: browser-side plugin loader error on http://127.0.0.1:' + p + ' (HARNESS overlay)',
           detail: 'headless DOM matched error pattern:\n' + page.errors.snippet + '\n--- notes ---\n' + (notes.join('\n') || '(none)'),
+        };
+      }
+      // 量到登入牆 ≠ marker 沒掛。這兩種結論必須分開，否則一個看不到畫面的檢查器會穩定地騙人
+      // （2026-11-07：uiChecks 因此連續三次誤報「外掛沒掛上」）。
+      if (page && page.authWall && uiChecks.length > 0) {
+        return {
+          ok: false,
+          summary: 'FAIL (inconclusive): headless page was the auth wall, not the app on http://127.0.0.1:' + p,
+          detail: 'ui checks could not run: the page rendered was "dsh web authentication required", '
+            + 'so no client plugin can have mounted there — the marker result says nothing about the plugin.\n'
+            + 'token found on host stdout: ' + (token ? 'yes (still got the wall)' : 'no (host printed no token URL)') + '\n'
+            + '--- notes ---\n' + (notes.join('\n') || '(none)'),
         };
       }
       const missing = page ? page.ui.filter((u) => !u.found) : [];
@@ -263,8 +329,9 @@ export async function bootCheck(port?: number, waitMs?: number, uiChecks: UiChec
     if (/ENOENT|not recognized|not found/i.test(msg)) {
       return {
         ok: false,
-        summary: 'FAIL: `dsh` command not found on PATH — cannot boot-verify this host',
-        detail: msg,
+        summary: 'FAIL: could not start the boot probe — the dsh engine executable was not found',
+        detail: 'resolved engine was not executable: ' + msg + '\n'
+          + 'this check boots the host\'s own bin.js; if it disappeared, the running release moved.',
       };
     }
     return { ok: false, summary: `FAIL: unexpected error: ${msg}`, detail: msg };
