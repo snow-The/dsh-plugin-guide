@@ -2,7 +2,7 @@
  * scan.ts — DSH plugin conformance scan.
  *
  * Rules mirror the hard checks in the official boot loader
- * (@deepseek-ai/dsh-app-boot) and the publish hygiene we learned the hard way:
+ * (@deepseek-ai/dsh-official-bundles, which in 0.2.2 took over the bundle list from the retired app-boot path) and the publish hygiene we learned the hard way:
  *
  *   1. package.json must declare `dsh.bundle` (a patch file or an entry).
  *   2. `dsh.bundle.patch` must point to an existing file.
@@ -46,7 +46,7 @@ import { parse as parseYaml } from 'yaml';
 
 /**
  * Official layers provided by the dsh host (global CLI), not by the profile's
- * own node_modules — matches @deepseek-ai/dsh-app-boot DEFAULT_PROFILE_BUNDLES
+ * own node_modules — matches @deepseek-ai/dsh-official-bundles DEFAULT_PROFILE_BUNDLES
  * plus the web-app layer. A profile may list them in bundles without declaring
  * them in dependencies.
  */
@@ -640,3 +640,4 @@ export function formatReport(report: ScanReport): string {
   }
   return lines.join('\n');
 }
+

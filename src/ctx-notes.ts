@@ -42,7 +42,10 @@ export const CTX_NOTES: CtxNote[] = [
   { member: 'ctx.storageDomain', what: '领域数据形态:在 KV 后端之上的 schema 校验 + 事件发射的域(存储层里真正带语义的一层)', example: 'ctx.storage.domain 声明域 + schema,读写走域而非裸 KV' },
   { member: 'ctx.sessionQuery', what: '(abstract seam) 跨会话查询引擎:逻辑记录、按 provider 无关的过滤/文档、全文检索分页、会话血缘、有界事件读取、事件关系', example: 'ctx.sessionQuery 检索历史会话的事件/文档(替代自己解 zstd + 解析 jsonl)' },
   { member: 'ctx.sessionPersistence', what: '(abstract seam) 会话持久化接缝(jsonl 后端即 session-persistence-jsonl)', example: 'ctx.sessionPersistence 是会话落盘的后端契约' },
-  { member: 'ctx.sessionProjections', what: '投影注册表:从日志派生的"每会话当前值"(可合并扩展的投影类型表 + provider 契约)', example: 'ctx.sessionProjections 注册/读取投影(如统计、大纲)' },
+  // 0.2.2 契約：register() 回 Promise<ProjectionHandle>，必須 await；registry 級的同步讀取已標 deprecated。
+  // 來源：安裝版 dsh-session-projection/lib/types/index.d.ts（"Callers must await registration … the callable
+  // runtime value is deprecated"）。舊寫法把 register 當同步函式用，在 0.2.2 會拿到一個 Promise 而不是 handle。
+  { member: 'ctx.sessionProjections', what: '投影注册表:从日志派生的"每会话当前值"(可合并扩展的投影类型表 + provider 契约);0.2.2 起 register() 回 Promise<ProjectionHandle>', example: 'const handle = await ctx.sessionProjections.register({ key, stateVersion, init, apply }); 释放用 handle.dispose() 或 fiber;registry 级同步读取已弃用' },
   { member: 'ctx.sessionProjectionCache', what: '投影缓存:持久化的每会话检查点记录,节流写回 + 缓存列表读取', example: '由 projection-cache 插件提供,加速投影重建' },
   { member: 'ctx.sessionController', what: '会话控制器:会话生命周期动作(创建/切换/控制)', example: 'ctx.sessionController 程序化控制会话' },
   { member: 'ctx.sessionTitle', what: '会话标题服务:日志支撑 + provider 注册表(首条消息/全 prompt 两种 LLM 策略)', example: 'ctx.sessionTitle 读取或生成会话标题' },
