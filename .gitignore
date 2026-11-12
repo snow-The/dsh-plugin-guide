@@ -1,3 +1,5 @@
 node_modules/
-dist/
+# dist/ 必須進版控：這個包以 github: 安裝，`prepare` 已移除（pnpm 對 git 依賴
+# 會先跑 `pnpm install` 再跑 prepare，在乾淨機器上必失敗），而 main 指向
+# dist/index.js —— 不入庫就等於發布一個沒有入口的包。
 *.log
