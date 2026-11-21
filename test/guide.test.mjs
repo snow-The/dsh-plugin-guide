@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { name, apply } from '../dist/index.js';
+import { name, apply, extractToken } from '../dist/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -600,4 +600,29 @@ test('every declared topic id is reachable (no topic shadowed by a ctx match)', 
     }
   }
 });
+
+test('extractToken reads the token the host prints, or reports null instead of guessing', () => {
+  // 回归守卫（2026-11-07）：uiChecks 曾连续三次报「插件 UI 没挂上」，实测原因是 headless
+  // 渲染到的是 401 登录墙（222 bytes），app 根本没启动。宿主的 token 就印在 stdout 上，
+  // 不看它等于闭着眼睛量登录页。这条测试钉住「怎么读」和「读不到就说读不到」。
+  const real = 'dsh web: http://127.0.0.1:3080/?token=VlUjdlOgW118Ra-ceFBLjrwFHTzB5KKusXFFIDrxLLg';
+  assert.equal(extractToken(real), 'VlUjdlOgW118Ra-ceFBLjrwFHTzB5KKusXFFIDrxLLg');
+
+  // 真实 stdout 是很多行：plugin 注册行、model listing 行都会混进来
+  const noisy = [
+    '[dsh-search] provider registered OK (web_search -> dsh-search)',
+    real,
+    '[llm-deepseek-api-key] model listing loaded 2 model(s), skipped 0 row(s)',
+  ].join('\n');
+  assert.equal(extractToken(noisy), 'VlUjdlOgW118Ra-ceFBLjrwFHTzB5KKusXFFIDrxLLg');
+
+  // token 不是第一个 query 参数时也不能抓错（曾经想当然用 /token=(.+)/ 就会抓成 "abc&x=1"）
+  assert.equal(extractToken('http://127.0.0.1:1/?x=1&token=abc-DEF_1'), 'abc-DEF_1');
+
+  // 读不到就说读不到：不许返回空串/undefined 让调用方误以为拿到了
+  assert.equal(extractToken('dsh web: http://127.0.0.1:3080/'), null);
+  assert.equal(extractToken(''), null);
+  assert.equal(extractToken('token=没有合法字符'), null);
+});
+
 
